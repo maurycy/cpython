@@ -455,7 +455,7 @@ class _Stream:
            is ready to be written.
         """
         self.buf += s
-        while len(self.buf) > self.bufsize:
+        while len(self.buf) >= self.bufsize:
             self.fileobj.write(self.buf[:self.bufsize])
             self.buf = self.buf[self.bufsize:]
 
