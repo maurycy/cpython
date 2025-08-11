@@ -1829,7 +1829,7 @@ def _simple_enum(etype=Enum, *, boundary=None, use_args=None):
             # Flag / IntFlag
             single_bits = multi_bits = 0
             for name, value in attrs.items():
-                if isinstance(value, auto) and auto.value is _auto_null:
+                if isinstance(value, auto) and value.value is _auto_null:
                     value = gnv(name, 1, len(member_names), gnv_last_values)
                 # create basic member (possibly isolate value for alias check)
                 if use_args:
