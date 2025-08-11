@@ -32,6 +32,7 @@ __all__ = ['get_close_matches', 'ndiff', 'restore', 'SequenceMatcher',
 
 from _colorize import can_colorize, get_theme
 from heapq import nlargest as _nlargest
+from collections import Counter as _Counter
 from collections import namedtuple as _namedtuple
 from types import GenericAlias
 
@@ -631,22 +632,9 @@ class SequenceMatcher:
         # of their intersection; this counts the number of matches
         # without regard to order, so is clearly an upper bound
         if self.fullbcount is None:
-            self.fullbcount = fullbcount = {}
-            for elt in self.b:
-                fullbcount[elt] = fullbcount.get(elt, 0) + 1
-        fullbcount = self.fullbcount
-        # avail[x] is the number of times x appears in 'b' less the
-        # number of times we've seen it in 'a' so far ... kinda
-        avail = {}
-        availhas, matches = avail.__contains__, 0
-        for elt in self.a:
-            if availhas(elt):
-                numb = avail[elt]
-            else:
-                numb = fullbcount.get(elt, 0)
-            avail[elt] = numb - 1
-            if numb > 0:
-                matches = matches + 1
+            self.fullbcount = _Counter(self.b)
+        a_counts = _Counter(self.a)
+        matches = sum((a_counts & self.fullbcount).values())
         return _calculate_ratio(matches, len(self.a) + len(self.b))
 
     def real_quick_ratio(self):
