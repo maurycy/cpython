@@ -923,26 +923,26 @@ Reader_iternext(PyObject *op)
     ReaderObj *self = _ReaderObj_CAST(op);
 
     PyObject *fields = NULL;
-    Py_UCS4 c;
-    Py_ssize_t pos, linelen;
-    int kind;
-    const void *data;
     PyObject *lineobj;
 
     _csvstate *module_state = _csv_state_from_type(Py_TYPE(self),
                                                    "Reader.__next__");
-    if (module_state == NULL) {
+    if (module_state == NULL)
+    {
         return NULL;
     }
 
     if (parse_reset(self) < 0)
         return NULL;
-    do {
+    do
+    {
         lineobj = PyIter_Next(self->input_iter);
-        if (lineobj == NULL) {
+        if (lineobj == NULL)
+        {
             /* End of input OR exception */
             if (!PyErr_Occurred() && (self->field_len != 0 ||
-                                      self->state == IN_QUOTED_FIELD)) {
+                                      self->state == IN_QUOTED_FIELD))
+            {
                 if (self->dialect->strict)
                     PyErr_SetString(module_state->error_obj,
                                     "unexpected end of data");
@@ -951,28 +951,139 @@ Reader_iternext(PyObject *op)
             }
             return NULL;
         }
-        if (!PyUnicode_Check(lineobj)) {
+        if (!PyUnicode_Check(lineobj))
+        {
             PyErr_Format(module_state->error_obj,
                          "iterator should return strings, "
                          "not %.200s "
                          "(the file should be opened in text mode)",
-                         Py_TYPE(lineobj)->tp_name
-                );
+                         Py_TYPE(lineobj)->tp_name);
             Py_DECREF(lineobj);
             return NULL;
         }
         ++self->line_num;
-        kind = PyUnicode_KIND(lineobj);
-        data = PyUnicode_DATA(lineobj);
-        pos = 0;
-        linelen = PyUnicode_GET_LENGTH(lineobj);
-        while (linelen--) {
-            c = PyUnicode_READ(kind, data, pos);
-            if (parse_process_char(self, module_state, c) < 0) {
-                Py_DECREF(lineobj);
-                goto err;
+
+        Py_ssize_t pos = 0;
+        Py_ssize_t linelen = PyUnicode_GET_LENGTH(lineobj);
+
+        while (pos < linelen)
+        {
+            Py_ssize_t chunk_len;
+            DialectObj *dialect = self->dialect;
+            Py_ssize_t p = -1, t;
+
+#define MIN_P(val)                             \
+    if ((val) != -1 && (p == -1 || (val) < p)) \
+    {                                          \
+        p = (val);                             \
+    }
+
+            switch (self->state)
+            {
+            case IN_FIELD:
+                t = PyUnicode_FindChar(lineobj, dialect->delimiter, pos, linelen, 1);
+                MIN_P(t);
+                t = PyUnicode_FindChar(lineobj, '\r', pos, linelen, 1);
+                MIN_P(t);
+                t = PyUnicode_FindChar(lineobj, '\n', pos, linelen, 1);
+                MIN_P(t);
+                if (dialect->escapechar != NOT_SET)
+                {
+                    t = PyUnicode_FindChar(lineobj, dialect->escapechar, pos, linelen, 1);
+                    MIN_P(t);
+                }
+                break;
+
+            case IN_QUOTED_FIELD:
+                t = PyUnicode_FindChar(lineobj, dialect->quotechar, pos, linelen, 1);
+                MIN_P(t);
+                if (dialect->escapechar != NOT_SET)
+                {
+                    t = PyUnicode_FindChar(lineobj, dialect->escapechar, pos, linelen, 1);
+                    MIN_P(t);
+                }
+                break;
+
+            default:
+                /* Other states process one character at a time */
+                p = pos;
+                break;
             }
-            pos++;
+#undef MIN_P
+
+            if (p == -1)
+            {
+                /* No special character found in the rest of the line */
+                chunk_len = linelen - pos;
+            }
+            else
+            {
+                /* Special character found at index p */
+                chunk_len = p - pos;
+            }
+
+            if (chunk_len > 0)
+            {
+                Py_ssize_t needed_len = self->field_len + chunk_len;
+                Py_ssize_t field_limit = FT_ATOMIC_LOAD_SSIZE_RELAXED(module_state->field_limit);
+                if (needed_len > field_limit)
+                {
+                    PyErr_Format(module_state->error_obj,
+                                 "field larger than field limit (%zd)",
+                                 field_limit);
+                    Py_DECREF(lineobj);
+                    goto err;
+                }
+                while (needed_len > self->field_size)
+                {
+                    if (!parse_grow_buff(self))
+                    {
+                        Py_DECREF(lineobj);
+                        goto err;
+                    }
+                }
+
+                /* Efficiently copy the character chunk */
+                int kind = PyUnicode_KIND(lineobj);
+                const void *data = PyUnicode_DATA(lineobj);
+                switch (kind)
+                {
+                case PyUnicode_1BYTE_KIND:
+                {
+                    Py_UCS4 *dest = self->field + self->field_len;
+                    const Py_UCS1 *src = (const Py_UCS1 *)data + pos;
+                    for (Py_ssize_t i = 0; i < chunk_len; ++i)
+                        dest[i] = src[i];
+                    break;
+                }
+                case PyUnicode_2BYTE_KIND:
+                {
+                    Py_UCS4 *dest = self->field + self->field_len;
+                    const Py_UCS2 *src = (const Py_UCS2 *)data + pos;
+                    for (Py_ssize_t i = 0; i < chunk_len; ++i)
+                        dest[i] = src[i];
+                    break;
+                }
+                case PyUnicode_4BYTE_KIND:
+                    memcpy(self->field + self->field_len,
+                           (const Py_UCS4 *)data + pos,
+                           chunk_len * sizeof(Py_UCS4));
+                    break;
+                }
+                self->field_len += chunk_len;
+                pos += chunk_len;
+            }
+
+            if (pos < linelen)
+            {
+                Py_UCS4 c = PyUnicode_READ_CHAR(lineobj, pos);
+                if (parse_process_char(self, module_state, c) < 0)
+                {
+                    Py_DECREF(lineobj);
+                    goto err;
+                }
+                pos++;
+            }
         }
         Py_DECREF(lineobj);
         if (parse_process_char(self, module_state, EOL) < 0)
@@ -984,7 +1095,6 @@ Reader_iternext(PyObject *op)
 err:
     return fields;
 }
-
 static void
 Reader_dealloc(PyObject *op)
 {
