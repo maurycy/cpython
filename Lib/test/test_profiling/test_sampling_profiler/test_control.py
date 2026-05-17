@@ -88,7 +88,7 @@ class ControlServerTests(unittest.TestCase):
     def test_start_fails_on_occupied_path(self):
         """start() raises ControlError when the path is already bound."""
         squatter = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        squatter.bind(self.path)
+        socket_helper.bind_unix_socket(squatter, self.path)
         self.addCleanup(squatter.close)
         with self.assertRaisesRegex(ControlError, "failed to start"):
             ControlServer(f"unix:{self.path}").start()
@@ -154,7 +154,7 @@ class ControlServerTests(unittest.TestCase):
         server = self.start_server()
         os.unlink(self.path)
         replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        replacement.bind(self.path)
+        socket_helper.bind_unix_socket(replacement, self.path)
         self.addCleanup(replacement.close)
         server.stop()
         self.assertTrue(os.path.exists(self.path))
