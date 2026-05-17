@@ -31,6 +31,7 @@ except ImportError:
 from test.support import (
     requires_remote_subprocess_debugging,
     SHORT_TIMEOUT,
+    os_helper,
     socket_helper,
 )
 
@@ -983,9 +984,8 @@ for _ in range(200):
     time.sleep(0.05)
 '''
         with test_subprocess(script, wait_for_working=True) as target:
-            tmpdir = tempfile.mkdtemp()
-            self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-            socket_path = os.path.join(tmpdir, "tachyon.sock")
+            socket_path = socket_helper.create_unix_domain_name()
+            self.addCleanup(os_helper.unlink, socket_path)
 
             server = ControlServer(f"unix:{socket_path}")
             server.start()

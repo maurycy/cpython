@@ -2,14 +2,12 @@
 
 import io
 import os
-import shutil
 import socket
-import tempfile
 import time
 import unittest
 from unittest import mock
 
-from test.support import SHORT_TIMEOUT, socket_helper
+from test.support import SHORT_TIMEOUT, os_helper, socket_helper
 
 try:
     from profiling.sampling._control import (
@@ -30,9 +28,8 @@ class ControlServerTests(unittest.TestCase):
     """Tests for ControlServer protocol, lifecycle and CLI integration."""
 
     def setUp(self):
-        tmpdir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, tmpdir, ignore_errors=True)
-        self.path = os.path.join(tmpdir, "control.sock")
+        self.path = socket_helper.create_unix_domain_name()
+        self.addCleanup(os_helper.unlink, self.path)
 
     def start_server(self):
         server = ControlServer(f"unix:{self.path}")
