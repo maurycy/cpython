@@ -31,6 +31,7 @@ except ImportError:
 from test.support import (
     requires_remote_subprocess_debugging,
     SHORT_TIMEOUT,
+    socket_helper,
 )
 
 from .helpers import (
@@ -960,7 +961,7 @@ class TestDeepGeneratorFrameCache(unittest.TestCase):
 
 
 @requires_remote_subprocess_debugging()
-@unittest.skipIf(os.name == "nt", "--control uses AF_UNIX, not supported on Windows")
+@socket_helper.skip_unless_bind_unix_socket
 @unittest.skipIf(
     sys.platform == "darwin" and os.geteuid() != 0,
     "macOS profiling requires elevated permissions",

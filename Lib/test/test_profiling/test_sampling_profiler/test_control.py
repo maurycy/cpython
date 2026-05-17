@@ -9,6 +9,8 @@ import time
 import unittest
 from unittest import mock
 
+from test.support import SHORT_TIMEOUT, socket_helper
+
 try:
     from profiling.sampling._control import (
         ControlServer,
@@ -23,6 +25,7 @@ except ImportError:
     )
 
 
+@socket_helper.skip_unless_bind_unix_socket
 class ControlServerTests(unittest.TestCase):
     """Tests for ControlServer protocol, lifecycle and CLI integration."""
 
@@ -46,7 +49,7 @@ class ControlServerTests(unittest.TestCase):
 
     def request(self, server, client, command):
         client.sendall(command)
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + SHORT_TIMEOUT
         while time.monotonic() < deadline:
             server.poll(timeout=0.05)
             try:
@@ -124,7 +127,7 @@ class ControlServerTests(unittest.TestCase):
         client = self.connect()
         self.assertEqual(self.request(server, client, b"quit\n"), b"ok\n")
         self.assertFalse(server.control.running)
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + SHORT_TIMEOUT
         while time.monotonic() < deadline:
             server.poll(timeout=0.05)
             try:
@@ -142,7 +145,7 @@ class ControlServerTests(unittest.TestCase):
         client.connect(self.path)
         self.addCleanup(client.close)
         client.sendall(b"x" * (_MAX_INBUF_BYTES + 1))
-        deadline = time.monotonic() + 1.0
+        deadline = time.monotonic() + SHORT_TIMEOUT
         while time.monotonic() < deadline:
             server.poll(timeout=0.05)
             if not server._connections:
