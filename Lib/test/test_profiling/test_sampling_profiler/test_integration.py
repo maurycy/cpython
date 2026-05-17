@@ -998,9 +998,22 @@ for _ in range(200):
             while time.monotonic() < deadline:
                 if os.path.exists(socket_path):
                     break
+                if profiler.poll() is not None:
+                    stdout, stderr = profiler.communicate()
+                    self.fail(
+                        f"profiler exited early with rc={profiler.returncode} "
+                        f"stdout={stdout!r} stderr={stderr!r}"
+                    )
                 time.sleep(0.05)
             else:
-                self.fail("profiler did not create the control socket")
+                stdout, stderr = b"", b""
+                if profiler.poll() is not None:
+                    stdout, stderr = profiler.communicate()
+                self.fail(
+                    f"profiler did not create the control socket "
+                    f"(poll={profiler.poll()!r} "
+                    f"stdout={stdout!r} stderr={stderr!r})"
+                )
 
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
                 client.settimeout(SHORT_TIMEOUT)
