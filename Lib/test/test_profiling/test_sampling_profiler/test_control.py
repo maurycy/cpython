@@ -15,7 +15,7 @@ try:
         _MAX_INBUF_BYTES,
         parse_control_uri,
     )
-    from profiling.sampling.cli import main
+    from profiling.sampling.cli import LiveStatsCollector, main
     from profiling.sampling.errors import ControlError, ControlURIError
 except ImportError:
     raise unittest.SkipTest(
@@ -198,6 +198,8 @@ class ControlServerTests(unittest.TestCase):
         self.assertEqual(cm.exception.code, 2)
         self.assertIn("unsupported control URI scheme", stderr.getvalue())
 
+    @unittest.skipUnless(LiveStatsCollector is not None,
+                         "requires curses for --live")
     def test_cli_accepts_control_with_live(self):
         """--control and --live coexist after the mutex was dropped."""
         argv = [
