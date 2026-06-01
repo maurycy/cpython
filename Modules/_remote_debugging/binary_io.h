@@ -24,6 +24,7 @@ extern "C" {
 #define BINARY_FORMAT_MAGIC     0x54414348  /* "TACH" (Tachyon) in native byte order */
 #define BINARY_FORMAT_MAGIC_SWAPPED 0x48434154  /* Byte-swapped magic for endianness detection */
 #define BINARY_FORMAT_VERSION   1
+#define BINARY_FORMAT_CHUNKED_VERSION 2
 
 /* Sentinel values for optional frame fields */
 #define OPCODE_NONE             255  /* No opcode captured (u8 sentinel) */
@@ -61,9 +62,13 @@ extern "C" {
 #define HDR_SIZE_COMPRESSION 4
 #define FILE_HEADER_SIZE     (HDR_OFF_COMPRESSION + HDR_SIZE_COMPRESSION)
 #define FILE_HEADER_PLACEHOLDER_SIZE 64
+#define HDR_OFF_CHUNK_SIZE   56
+#define HDR_SIZE_CHUNK_SIZE  8
 
 static_assert(FILE_HEADER_SIZE <= FILE_HEADER_PLACEHOLDER_SIZE,
               "FILE_HEADER_SIZE exceeds FILE_HEADER_PLACEHOLDER_SIZE");
+static_assert(HDR_OFF_CHUNK_SIZE + HDR_SIZE_CHUNK_SIZE == FILE_HEADER_PLACEHOLDER_SIZE,
+              "Chunk size locator must occupy the final reserved header bytes");
 
 /* Sample header field offsets and sizes */
 #define SMP_OFF_THREAD_ID        0
@@ -266,7 +271,11 @@ typedef struct {
     /* Metadata */
     uint64_t start_time_us;
     uint64_t sample_interval_us;
-    uint32_t total_samples;
+    uint32_t total_samples;       /* Current chunk in v2, whole file in v1 */
+    uint64_t lifetime_samples;    /* Cumulative writer-side count */
+    int chunked;
+    int chunk_open;
+    uint64_t chunk_start_offset;
 
     /* String hash table: PyObject* -> uint32_t index */
     _Py_hashtable_t *string_hash;
@@ -326,16 +335,25 @@ typedef struct {
     size_t decompressed_size;
 
     /* Header metadata */
+    uint32_t format_version;
+    int chunked;
     uint8_t py_major;
     uint8_t py_minor;
     uint8_t py_micro;
     int needs_swap;  /* Non-zero if file was written on different-endian system */
     uint64_t start_time_us;
     uint64_t sample_interval_us;
-    uint32_t sample_count;
+    uint32_t sample_count;        /* Current chunk in v2, whole file in v1 */
+    uint64_t total_sample_count;  /* Cumulative count for complete chunks */
     uint32_t thread_count;
     uint64_t string_table_offset;
     uint64_t frame_table_offset;
+    uint64_t chunk_size;
+    uint64_t footer_file_size;
+    size_t complete_chunk_count;
+    uint32_t metadata_thread_count;
+    uint32_t metadata_string_count;
+    uint32_t metadata_frame_count;
 
     /* Parsed string table: array of Python string objects */
     PyObject **strings;
@@ -530,7 +548,8 @@ BinaryWriter *binary_writer_create(
     PyObject *path,
     uint64_t sample_interval_us,
     int compression_type,
-    uint64_t start_time_us
+    uint64_t start_time_us,
+    int chunked
 );
 
 /*
@@ -561,6 +580,18 @@ int binary_writer_write_sample(
  *   0 on success, -1 on failure (PyErr set)
  */
 int binary_writer_finalize(BinaryWriter *writer);
+
+/*
+ * Commit the current chunk and reset per-chunk state.
+ * Only valid for chunked writers.
+ */
+int binary_writer_flush_chunk(BinaryWriter *writer);
+
+/*
+ * Return cumulative samples written. This is the whole-file count for v1 and
+ * the lifetime count across committed/open chunks for v2.
+ */
+uint64_t binary_writer_total_samples(BinaryWriter *writer);
 
 /*
  * Destroy a binary writer and free all resources.

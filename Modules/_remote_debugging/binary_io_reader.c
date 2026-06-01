@@ -32,6 +32,40 @@
  * BINARY READER IMPLEMENTATION
  * ============================================================================ */
 
+static void
+reader_clear_chunk_data(BinaryReader *reader)
+{
+    PyMem_Free(reader->decompressed_data);
+    reader->decompressed_data = NULL;
+    reader->decompressed_size = 0;
+
+    if (reader->strings) {
+        for (uint32_t i = 0; i < reader->strings_count; i++) {
+            Py_XDECREF(reader->strings[i]);
+        }
+        PyMem_Free(reader->strings);
+        reader->strings = NULL;
+    }
+    reader->strings_count = 0;
+
+    PyMem_Free(reader->frames);
+    reader->frames = NULL;
+    reader->frames_count = 0;
+
+    if (reader->thread_states) {
+        for (size_t i = 0; i < reader->thread_state_count; i++) {
+            PyMem_Free(reader->thread_states[i].current_stack);
+        }
+        PyMem_Free(reader->thread_states);
+        reader->thread_states = NULL;
+    }
+    reader->thread_state_count = 0;
+    reader->thread_state_capacity = 0;
+
+    reader->sample_data = NULL;
+    reader->sample_data_size = 0;
+}
+
 static inline int
 reader_parse_header(BinaryReader *reader, const uint8_t *data, size_t file_size)
 {
@@ -57,8 +91,9 @@ reader_parse_header(BinaryReader *reader, const uint8_t *data, size_t file_size)
         return -1;
     }
 
-    if (version != BINARY_FORMAT_VERSION) {
-        if (version > BINARY_FORMAT_VERSION && file_size >= HDR_OFF_PY_MICRO + 1) {
+    if (version != BINARY_FORMAT_VERSION &&
+        version != BINARY_FORMAT_CHUNKED_VERSION) {
+        if (version > BINARY_FORMAT_CHUNKED_VERSION && file_size >= HDR_OFF_PY_MICRO + 1) {
             /* Newer format - try to read Python version for better error */
             uint8_t py_major = data[HDR_OFF_PY_MAJOR];
             uint8_t py_minor = data[HDR_OFF_PY_MINOR];
@@ -68,21 +103,23 @@ reader_parse_header(BinaryReader *reader, const uint8_t *data, size_t file_size)
                 "but this is Python %d.%d.%d (format version %d)",
                 py_major, py_minor, py_micro, version,
                 PY_MAJOR_VERSION, PY_MINOR_VERSION, PY_MICRO_VERSION,
-                BINARY_FORMAT_VERSION);
+                BINARY_FORMAT_CHUNKED_VERSION);
         } else {
             PyErr_Format(PyExc_ValueError,
-                "Unsupported format version %u (this reader supports version %d)",
-                version, BINARY_FORMAT_VERSION);
+                "Unsupported format version %u (this reader supports versions %d and %d)",
+                version, BINARY_FORMAT_VERSION, BINARY_FORMAT_CHUNKED_VERSION);
         }
         return -1;
     }
 
+    reader->format_version = version;
+    reader->chunked = (version == BINARY_FORMAT_CHUNKED_VERSION);
     reader->py_major = data[HDR_OFF_PY_MAJOR];
     reader->py_minor = data[HDR_OFF_PY_MINOR];
     reader->py_micro = data[HDR_OFF_PY_MICRO];
 
     /* Read header fields with byte-swapping if needed */
-    uint64_t start_time_us, sample_interval_us, string_table_offset, frame_table_offset;
+    uint64_t start_time_us, sample_interval_us, string_table_offset, frame_table_offset, chunk_size = 0;
     uint32_t sample_count, thread_count, compression_type;
 
     memcpy(&start_time_us, &data[HDR_OFF_START_TIME], HDR_SIZE_START_TIME);
@@ -92,6 +129,9 @@ reader_parse_header(BinaryReader *reader, const uint8_t *data, size_t file_size)
     memcpy(&string_table_offset, &data[HDR_OFF_STR_TABLE], HDR_SIZE_STR_TABLE);
     memcpy(&frame_table_offset, &data[HDR_OFF_FRAME_TABLE], HDR_SIZE_FRAME_TABLE);
     memcpy(&compression_type, &data[HDR_OFF_COMPRESSION], HDR_SIZE_COMPRESSION);
+    if (reader->chunked) {
+        memcpy(&chunk_size, &data[HDR_OFF_CHUNK_SIZE], HDR_SIZE_CHUNK_SIZE);
+    }
 
     reader->start_time_us = SWAP64_IF(reader->needs_swap, start_time_us);
     reader->sample_interval_us = SWAP64_IF(reader->needs_swap, sample_interval_us);
@@ -100,6 +140,7 @@ reader_parse_header(BinaryReader *reader, const uint8_t *data, size_t file_size)
     reader->string_table_offset = SWAP64_IF(reader->needs_swap, string_table_offset);
     reader->frame_table_offset = SWAP64_IF(reader->needs_swap, frame_table_offset);
     reader->compression_type = (int)SWAP32_IF(reader->needs_swap, compression_type);
+    reader->chunk_size = reader->chunked ? SWAP64_IF(reader->needs_swap, chunk_size) : file_size;
 
     return 0;
 }
@@ -115,11 +156,14 @@ reader_parse_footer(BinaryReader *reader, const uint8_t *data, size_t file_size)
     const uint8_t *footer = data + file_size - FILE_FOOTER_SIZE;
     /* Use memcpy to avoid strict aliasing violations */
     uint32_t strings_count, frames_count;
+    uint64_t footer_file_size;
     memcpy(&strings_count, &footer[FTR_OFF_STRINGS], FTR_SIZE_STRINGS);
     memcpy(&frames_count, &footer[FTR_OFF_FRAMES], FTR_SIZE_FRAMES);
+    memcpy(&footer_file_size, &footer[FTR_OFF_FILE_SIZE], FTR_SIZE_FILE_SIZE);
 
     reader->strings_count = SWAP32_IF(reader->needs_swap, strings_count);
     reader->frames_count = SWAP32_IF(reader->needs_swap, frames_count);
+    reader->footer_file_size = SWAP64_IF(reader->needs_swap, footer_file_size);
 
     return 0;
 }
@@ -357,6 +401,183 @@ reader_parse_frame_table(BinaryReader *reader, const uint8_t *data, size_t file_
     return 0;
 }
 
+static int
+reader_validate_current_layout(BinaryReader *reader, size_t file_size)
+{
+    size_t footer_start = file_size - FILE_FOOTER_SIZE;
+
+    if (reader->string_table_offset > file_size) {
+        PyErr_Format(PyExc_ValueError,
+            "Invalid string table offset: %llu exceeds file size %zu",
+            (unsigned long long)reader->string_table_offset, file_size);
+        return -1;
+    }
+    if (reader->frame_table_offset > file_size) {
+        PyErr_Format(PyExc_ValueError,
+            "Invalid frame table offset: %llu exceeds file size %zu",
+            (unsigned long long)reader->frame_table_offset, file_size);
+        return -1;
+    }
+    if (reader->string_table_offset < FILE_HEADER_PLACEHOLDER_SIZE) {
+        PyErr_Format(PyExc_ValueError,
+            "Invalid string table offset: %llu is before data section",
+            (unsigned long long)reader->string_table_offset);
+        return -1;
+    }
+    if (reader->frame_table_offset < FILE_HEADER_PLACEHOLDER_SIZE) {
+        PyErr_Format(PyExc_ValueError,
+            "Invalid frame table offset: %llu is before data section",
+            (unsigned long long)reader->frame_table_offset);
+        return -1;
+    }
+    if (reader->string_table_offset > reader->frame_table_offset) {
+        PyErr_Format(PyExc_ValueError,
+            "Invalid table offsets: string table (%llu) is after frame table (%llu)",
+            (unsigned long long)reader->string_table_offset,
+            (unsigned long long)reader->frame_table_offset);
+        return -1;
+    }
+    if (reader->frame_table_offset > footer_start) {
+        PyErr_Format(PyExc_ValueError,
+            "Invalid frame table offset: %llu is after footer start %zu",
+            (unsigned long long)reader->frame_table_offset, footer_start);
+        return -1;
+    }
+    if (reader->compression_type != COMPRESSION_NONE &&
+        reader->compression_type != COMPRESSION_ZSTD) {
+        PyErr_Format(PyExc_ValueError,
+            "Unsupported compression type: %d", reader->compression_type);
+        return -1;
+    }
+
+    if (reader->chunked && reader->footer_file_size != reader->chunk_size) {
+        PyErr_Format(PyExc_ValueError,
+            "Chunk footer size %llu does not match header size %llu",
+            (unsigned long long)reader->footer_file_size,
+            (unsigned long long)reader->chunk_size);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int
+reader_load_profile_data(BinaryReader *reader, const uint8_t *data, size_t file_size)
+{
+    reader_clear_chunk_data(reader);
+
+    /* Parse header and footer */
+    if (reader_parse_header(reader, data, file_size) < 0) {
+        return -1;
+    }
+    if (reader_parse_footer(reader, data, file_size) < 0) {
+        return -1;
+    }
+    if (reader_validate_current_layout(reader, file_size) < 0) {
+        return -1;
+    }
+
+    /* Handle compressed data */
+    if (reader->compression_type == COMPRESSION_ZSTD) {
+#ifdef HAVE_ZSTD
+        if (reader_decompress_samples(reader, data) < 0) {
+            return -1;
+        }
+#else
+        PyErr_SetString(PyExc_RuntimeError,
+            "File uses zstd compression but zstd support not compiled in");
+        return -1;
+#endif
+    } else {
+        reader->sample_data = (uint8_t *)data + FILE_HEADER_PLACEHOLDER_SIZE;
+        reader->sample_data_size = reader->string_table_offset - FILE_HEADER_PLACEHOLDER_SIZE;
+    }
+
+    /* Parse string and frame tables */
+    if (reader_parse_string_table(reader, data, file_size) < 0) {
+        return -1;
+    }
+    if (reader_parse_frame_table(reader, data, file_size) < 0) {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int
+reader_scan_chunked_metadata(BinaryReader *reader, const uint8_t *data, size_t file_size)
+{
+    size_t offset = 0;
+    uint64_t total_samples = 0;
+    size_t chunk_count = 0;
+    BinaryReader chunk = {0};
+
+    while (offset + FILE_HEADER_PLACEHOLDER_SIZE <= file_size) {
+        memset(&chunk, 0, sizeof(chunk));
+        if (reader_parse_header(&chunk, data + offset, file_size - offset) < 0) {
+            if (chunk_count > 0) {
+                PyErr_Clear();
+                break;
+            }
+            return -1;
+        }
+
+        if (!chunk.chunked || chunk.chunk_size == 0 ||
+            chunk.chunk_size < FILE_HEADER_PLACEHOLDER_SIZE + FILE_FOOTER_SIZE) {
+            if (chunk_count > 0) {
+                break;
+            }
+            PyErr_SetString(PyExc_ValueError, "No complete chunks in binary profile");
+            return -1;
+        }
+
+        if (chunk.chunk_size > file_size - offset) {
+            if (chunk_count > 0) {
+                break;
+            }
+            PyErr_SetString(PyExc_ValueError, "No complete chunks in binary profile");
+            return -1;
+        }
+
+        if (reader_parse_footer(&chunk, data + offset, (size_t)chunk.chunk_size) < 0 ||
+            reader_validate_current_layout(&chunk, (size_t)chunk.chunk_size) < 0) {
+            if (chunk_count > 0) {
+                PyErr_Clear();
+                break;
+            }
+            return -1;
+        }
+
+        if (chunk_count == 0) {
+            reader->format_version = chunk.format_version;
+            reader->chunked = 1;
+            reader->needs_swap = chunk.needs_swap;
+            reader->py_major = chunk.py_major;
+            reader->py_minor = chunk.py_minor;
+            reader->py_micro = chunk.py_micro;
+            reader->start_time_us = chunk.start_time_us;
+            reader->sample_interval_us = chunk.sample_interval_us;
+            reader->metadata_thread_count = chunk.thread_count;
+            reader->metadata_string_count = chunk.strings_count;
+            reader->metadata_frame_count = chunk.frames_count;
+            reader->compression_type = chunk.compression_type;
+        }
+
+        total_samples += chunk.sample_count;
+        chunk_count++;
+        offset += (size_t)chunk.chunk_size;
+    }
+
+    if (chunk_count == 0) {
+        PyErr_SetString(PyExc_ValueError, "No complete chunks in binary profile");
+        return -1;
+    }
+
+    reader->complete_chunk_count = chunk_count;
+    reader->total_sample_count = total_samples;
+    return 0;
+}
+
 BinaryReader *
 binary_reader_open(PyObject *path)
 {
@@ -465,69 +686,25 @@ binary_reader_open(PyObject *path)
     size_t file_size = reader->file_size;
 #endif
 
-    /* Parse header and footer */
-    if (reader_parse_header(reader, data, file_size) < 0) {
-        goto error;
-    }
-    if (reader_parse_footer(reader, data, file_size) < 0) {
+    BinaryReader probe = {0};
+    if (reader_parse_header(&probe, data, file_size) < 0) {
         goto error;
     }
 
-    /* Validate table offsets are within file bounds */
-    if (reader->string_table_offset > file_size) {
-        PyErr_Format(PyExc_ValueError,
-            "Invalid string table offset: %llu exceeds file size %zu",
-            (unsigned long long)reader->string_table_offset, file_size);
-        goto error;
-    }
-    if (reader->frame_table_offset > file_size) {
-        PyErr_Format(PyExc_ValueError,
-            "Invalid frame table offset: %llu exceeds file size %zu",
-            (unsigned long long)reader->frame_table_offset, file_size);
-        goto error;
-    }
-    if (reader->string_table_offset < FILE_HEADER_PLACEHOLDER_SIZE) {
-        PyErr_Format(PyExc_ValueError,
-            "Invalid string table offset: %llu is before data section",
-            (unsigned long long)reader->string_table_offset);
-        goto error;
-    }
-    if (reader->frame_table_offset < FILE_HEADER_PLACEHOLDER_SIZE) {
-        PyErr_Format(PyExc_ValueError,
-            "Invalid frame table offset: %llu is before data section",
-            (unsigned long long)reader->frame_table_offset);
-        goto error;
-    }
-    if (reader->string_table_offset > reader->frame_table_offset) {
-        PyErr_Format(PyExc_ValueError,
-            "Invalid table offsets: string table (%llu) is after frame table (%llu)",
-            (unsigned long long)reader->string_table_offset,
-            (unsigned long long)reader->frame_table_offset);
-        goto error;
-    }
-
-    /* Handle compressed data */
-    if (reader->compression_type == COMPRESSION_ZSTD) {
-#ifdef HAVE_ZSTD
-        if (reader_decompress_samples(reader, data) < 0) {
+    if (probe.chunked) {
+        if (reader_scan_chunked_metadata(reader, data, file_size) < 0) {
             goto error;
         }
-#else
-        PyErr_SetString(PyExc_RuntimeError,
-            "File uses zstd compression but zstd support not compiled in");
-        goto error;
-#endif
-    } else {
-        reader->sample_data = data + FILE_HEADER_PLACEHOLDER_SIZE;
-        reader->sample_data_size = reader->string_table_offset - FILE_HEADER_PLACEHOLDER_SIZE;
     }
-
-    /* Parse string and frame tables */
-    if (reader_parse_string_table(reader, data, file_size) < 0) {
-        goto error;
-    }
-    if (reader_parse_frame_table(reader, data, file_size) < 0) {
-        goto error;
+    else {
+        if (reader_load_profile_data(reader, data, file_size) < 0) {
+            goto error;
+        }
+        reader->total_sample_count = reader->sample_count;
+        reader->complete_chunk_count = 1;
+        reader->metadata_thread_count = reader->thread_count;
+        reader->metadata_string_count = reader->strings_count;
+        reader->metadata_frame_count = reader->frames_count;
     }
 
     return reader;
@@ -928,10 +1105,10 @@ emit_batch(RemoteDebuggingState *state, PyObject *collector,
 
 /* Helper to invoke progress callback, returns -1 on error */
 static inline int
-invoke_progress_callback(PyObject *callback, Py_ssize_t current, uint32_t total)
+invoke_progress_callback(PyObject *callback, Py_ssize_t current, uint64_t total)
 {
     if (callback && callback != Py_None) {
-        PyObject *result = PyObject_CallFunction(callback, "nI", current, total);
+        PyObject *result = PyObject_CallFunction(callback, "nK", current, total);
         if (result) {
             Py_DECREF(result);
         } else {
@@ -941,34 +1118,12 @@ invoke_progress_callback(PyObject *callback, Py_ssize_t current, uint32_t total)
     return 0;
 }
 
-Py_ssize_t
-binary_reader_replay(BinaryReader *reader, PyObject *collector, PyObject *progress_callback)
+static Py_ssize_t
+reader_replay_loaded_chunk(BinaryReader *reader, RemoteDebuggingState *state,
+                           PyObject *collector, PyObject *progress_callback,
+                           Py_ssize_t replayed, uint64_t total_samples)
 {
-    if (!PyObject_HasAttrString(collector, "collect")) {
-        PyErr_SetString(PyExc_TypeError, "Collector must have a collect() method");
-        return -1;
-    }
-
-    /* Get module state for struct sequence types */
-    PyObject *module = PyImport_ImportModule("_remote_debugging");
-    if (!module) {
-        return -1;
-    }
-    RemoteDebuggingState *state = RemoteDebugging_GetState(module);
-    Py_DECREF(module);
-
-    if (!state) {
-        PyErr_SetString(PyExc_RuntimeError, "Failed to get module state");
-        return -1;
-    }
-
     size_t offset = 0;
-    Py_ssize_t replayed = 0;
-
-    /* Initial progress callback at 0% */
-    if (invoke_progress_callback(progress_callback, 0, reader->sample_count) < 0) {
-        return -1;
-    }
 
     while (offset < reader->sample_data_size) {
         /* Read thread_id (8 bytes) + interpreter_id (4 bytes) + encoding byte */
@@ -1087,7 +1242,7 @@ binary_reader_replay(BinaryReader *reader, PyObject *collector, PyObject *progre
 
             /* Progress callback after batch */
             if (replayed % PROGRESS_CALLBACK_INTERVAL < count) {
-                if (invoke_progress_callback(progress_callback, replayed, reader->sample_count) < 0) {
+                if (invoke_progress_callback(progress_callback, replayed, total_samples) < 0) {
                     return -1;
                 }
             }
@@ -1161,14 +1316,88 @@ binary_reader_replay(BinaryReader *reader, PyObject *collector, PyObject *progre
 
         /* Progress callback */
         if (replayed % PROGRESS_CALLBACK_INTERVAL == 0) {
-            if (invoke_progress_callback(progress_callback, replayed, reader->sample_count) < 0) {
+            if (invoke_progress_callback(progress_callback, replayed, total_samples) < 0) {
                 return -1;
             }
         }
     }
 
+    return replayed;
+}
+
+Py_ssize_t
+binary_reader_replay(BinaryReader *reader, PyObject *collector, PyObject *progress_callback)
+{
+    if (!PyObject_HasAttrString(collector, "collect")) {
+        PyErr_SetString(PyExc_TypeError, "Collector must have a collect() method");
+        return -1;
+    }
+
+    /* Get module state for struct sequence types */
+    PyObject *module = PyImport_ImportModule("_remote_debugging");
+    if (!module) {
+        return -1;
+    }
+    RemoteDebuggingState *state = RemoteDebugging_GetState(module);
+    Py_DECREF(module);
+
+    if (!state) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to get module state");
+        return -1;
+    }
+
+    uint64_t total_samples = reader->total_sample_count;
+    Py_ssize_t replayed = 0;
+
+    /* Initial progress callback at 0% */
+    if (invoke_progress_callback(progress_callback, 0, total_samples) < 0) {
+        return -1;
+    }
+
+    if (!reader->chunked) {
+        replayed = reader_replay_loaded_chunk(reader, state, collector,
+                                              progress_callback, 0,
+                                              total_samples);
+        if (replayed < 0) {
+            return -1;
+        }
+    }
+    else {
+#if USE_MMAP
+        const uint8_t *data = reader->mapped_data;
+        size_t file_size = reader->mapped_size;
+#else
+        const uint8_t *data = reader->file_data;
+        size_t file_size = reader->file_size;
+#endif
+        size_t offset = 0;
+        for (size_t i = 0; i < reader->complete_chunk_count; i++) {
+            BinaryReader probe = {0};
+            if (reader_parse_header(&probe, data + offset, file_size - offset) < 0) {
+                return -1;
+            }
+            if (!probe.chunked || probe.chunk_size == 0 ||
+                probe.chunk_size > file_size - offset) {
+                PyErr_SetString(PyExc_ValueError, "Invalid chunk while replaying binary profile");
+                return -1;
+            }
+
+            if (reader_load_profile_data(reader, data + offset, (size_t)probe.chunk_size) < 0) {
+                return -1;
+            }
+            replayed = reader_replay_loaded_chunk(reader, state, collector,
+                                                  progress_callback, replayed,
+                                                  total_samples);
+            reader_clear_chunk_data(reader);
+            if (replayed < 0) {
+                return -1;
+            }
+            offset += (size_t)probe.chunk_size;
+        }
+    }
+
     /* Final progress callback at 100% */
-    if (invoke_progress_callback(progress_callback, replayed, reader->sample_count) < 0) {
+    if (invoke_progress_callback(progress_callback, replayed, total_samples) < 0) {
         return -1;
     }
 
@@ -1184,16 +1413,18 @@ binary_reader_get_info(BinaryReader *reader)
         return NULL;
     }
     return Py_BuildValue(
-        "{s:I, s:N, s:K, s:K, s:I, s:I, s:I, s:I, s:i}",
-        "version", BINARY_FORMAT_VERSION,
+        "{s:I, s:N, s:K, s:K, s:K, s:I, s:I, s:I, s:i, s:O, s:n}",
+        "version", reader->format_version,
         "python_version", py_version,
         "start_time_us", reader->start_time_us,
         "sample_interval_us", reader->sample_interval_us,
-        "sample_count", reader->sample_count,
-        "thread_count", reader->thread_count,
-        "string_count", reader->strings_count,
-        "frame_count", reader->frames_count,
-        "compression_type", reader->compression_type
+        "sample_count", reader->total_sample_count,
+        "thread_count", reader->metadata_thread_count,
+        "string_count", reader->metadata_string_count,
+        "frame_count", reader->metadata_frame_count,
+        "compression_type", reader->compression_type,
+        "chunked", reader->chunked ? Py_True : Py_False,
+        "complete_chunks", (Py_ssize_t)reader->complete_chunk_count
     );
 }
 
@@ -1205,7 +1436,7 @@ binary_writer_get_stats(BinaryWriter *writer)
     /* Calculate derived stats */
     uint64_t total_records = s->repeat_records + s->full_records +
                              s->suffix_records + s->pop_push_records;
-    uint64_t total_samples = writer->total_samples;
+    uint64_t total_samples = binary_writer_total_samples(writer);
     uint64_t potential_frames = s->total_frames_written + s->frames_saved;
     double compression_ratio = (potential_frames > 0) ?
         (double)s->frames_saved / potential_frames * 100.0 : 0.0;

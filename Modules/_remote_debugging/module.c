@@ -14,7 +14,7 @@
 typedef struct {
     PyObject_HEAD
     BinaryWriter *writer;
-    uint32_t cached_total_samples;  /* Preserved after finalize */
+    uint64_t cached_total_samples;  /* Preserved after finalize */
 } BinaryWriterObject;
 
 typedef struct {
@@ -1481,6 +1481,7 @@ _remote_debugging.BinaryWriter.__init__
     start_time_us: unsigned_long_long
     *
     compression: int = 0
+    chunked: bool = False
 
 High-performance binary writer for profiling data.
 
@@ -1489,6 +1490,7 @@ Arguments:
     sample_interval_us: Sampling interval in microseconds
     start_time_us: Start timestamp in microseconds (from time.monotonic() * 1e6)
     compression: 0=none, 1=zstd (default: 0)
+    chunked: If true, write a concatenation of independently decodable chunks
 
 Use as a context manager or call finalize() when done.
 [clinic start generated code]*/
@@ -1498,14 +1500,14 @@ _remote_debugging_BinaryWriter___init___impl(BinaryWriterObject *self,
                                              PyObject *filename,
                                              unsigned long long sample_interval_us,
                                              unsigned long long start_time_us,
-                                             int compression)
-/*[clinic end generated code: output=00446656ea2e5986 input=b92f0c77ba4cd274]*/
+                                             int compression, int chunked)
+/*[clinic end generated code: output=41b6611557711f76 input=22259bb209b5edf4]*/
 {
     if (self->writer) {
         binary_writer_destroy(self->writer);
     }
 
-    self->writer = binary_writer_create(filename, sample_interval_us, compression, start_time_us);
+    self->writer = binary_writer_create(filename, sample_interval_us, compression, start_time_us, chunked);
     if (!self->writer) {
         return -1;
     }
@@ -1556,10 +1558,34 @@ binary_writer_finalize_and_cache(BinaryWriterObject *self)
     if (binary_writer_finalize(self->writer) < 0) {
         return -1;
     }
-    self->cached_total_samples = self->writer->total_samples;
+    self->cached_total_samples = binary_writer_total_samples(self->writer);
     binary_writer_destroy(self->writer);
     self->writer = NULL;
     return 0;
+}
+
+/*[clinic input]
+_remote_debugging.BinaryWriter.flush
+
+Commit the current binary chunk.
+
+Only available for chunked writers.
+[clinic start generated code]*/
+
+static PyObject *
+_remote_debugging_BinaryWriter_flush_impl(BinaryWriterObject *self)
+/*[clinic end generated code: output=640176ba6d249235 input=f1ac87b43c13d467]*/
+{
+    if (!self->writer) {
+        PyErr_SetString(PyExc_ValueError, "Writer is closed");
+        return NULL;
+    }
+
+    if (binary_writer_flush_chunk(self->writer) < 0) {
+        return NULL;
+    }
+
+    Py_RETURN_NONE;
 }
 
 /*[clinic input]
@@ -1679,9 +1705,9 @@ BinaryWriter_get_total_samples(PyObject *op, void *closure)
     BinaryWriterObject *self = BinaryWriter_CAST(op);
     if (!self->writer) {
         /* Use cached value after finalize/close */
-        return PyLong_FromUnsignedLong(self->cached_total_samples);
+        return PyLong_FromUnsignedLongLong(self->cached_total_samples);
     }
-    return PyLong_FromUnsignedLong(self->writer->total_samples);
+    return PyLong_FromUnsignedLongLong(binary_writer_total_samples(self->writer));
 }
 
 static PyGetSetDef BinaryWriter_getset[] = {
@@ -1691,6 +1717,7 @@ static PyGetSetDef BinaryWriter_getset[] = {
 
 static PyMethodDef BinaryWriter_methods[] = {
     _REMOTE_DEBUGGING_BINARYWRITER_WRITE_SAMPLE_METHODDEF
+    _REMOTE_DEBUGGING_BINARYWRITER_FLUSH_METHODDEF
     _REMOTE_DEBUGGING_BINARYWRITER_FINALIZE_METHODDEF
     _REMOTE_DEBUGGING_BINARYWRITER_CLOSE_METHODDEF
     _REMOTE_DEBUGGING_BINARYWRITER___ENTER___METHODDEF
@@ -1904,7 +1931,7 @@ BinaryReader_get_sample_count(BinaryReaderObject *self, void *closure)
     if (!self->reader) {
         return PyLong_FromLong(0);
     }
-    return PyLong_FromUnsignedLong(self->reader->sample_count);
+    return PyLong_FromUnsignedLongLong(self->reader->total_sample_count);
 }
 
 static PyObject *
