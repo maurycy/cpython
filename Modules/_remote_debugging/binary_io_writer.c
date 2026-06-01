@@ -114,6 +114,20 @@ fwrite_checked_allow_threads(const void *data, size_t size, FILE *fp)
     return 0;
 }
 
+static inline int
+fflush_checked_allow_threads(FILE *fp)
+{
+    int rc;
+    Py_BEGIN_ALLOW_THREADS
+    rc = fflush(fp);
+    Py_END_ALLOW_THREADS
+    if (rc != 0) {
+        PyErr_SetFromErrno(PyExc_IOError);
+        return -1;
+    }
+    return 0;
+}
+
 /* Forward declaration for writer_write_bytes */
 static inline int writer_write_bytes(BinaryWriter *writer, const void *data, size_t size);
 
@@ -201,6 +215,63 @@ writer_init_zstd(BinaryWriter *writer)
         "zstd compression requested but not available (HAVE_ZSTD not defined)");
     return -1;
 #endif
+}
+
+static int
+writer_reset_zstd_stream(BinaryWriter *writer)
+{
+#ifdef HAVE_ZSTD
+    if (writer->compression_type != COMPRESSION_ZSTD || !writer->zstd.cctx) {
+        return 0;
+    }
+
+    size_t result = ZSTD_CCtx_reset(writer->zstd.cctx, ZSTD_reset_session_only);
+    if (ZSTD_isError(result)) {
+        PyErr_Format(PyExc_RuntimeError, "Failed to reset zstd stream: %s",
+                     ZSTD_getErrorName(result));
+        return -1;
+    }
+    return 0;
+#else
+    return 0;
+#endif
+}
+
+static int
+writer_finish_zstd_stream(BinaryWriter *writer)
+{
+#ifdef HAVE_ZSTD
+    if (writer->compression_type != COMPRESSION_ZSTD || !writer->zstd.cctx) {
+        return 0;
+    }
+
+    ZSTD_inBuffer input = { NULL, 0, 0 };
+    size_t remaining;
+
+    do {
+        ZSTD_outBuffer output = {
+            writer->zstd.compressed_buffer,
+            writer->zstd.compressed_buffer_size,
+            0
+        };
+
+        remaining = ZSTD_compressStream2(writer->zstd.cctx, &output, &input, ZSTD_e_end);
+
+        if (ZSTD_isError(remaining)) {
+            PyErr_Format(PyExc_IOError, "zstd finalization error: %s",
+                         ZSTD_getErrorName(remaining));
+            return -1;
+        }
+
+        if (output.pos > 0) {
+            if (fwrite_checked_allow_threads(writer->zstd.compressed_buffer, output.pos, writer->fp) < 0) {
+                return -1;
+            }
+        }
+    } while (remaining > 0);
+#endif
+
+    return 0;
 }
 
 static int
@@ -355,6 +426,107 @@ static void
 frame_key_destroy(void *key)
 {
     PyMem_Free(key);
+}
+
+static void
+writer_clear_chunk_state(BinaryWriter *writer)
+{
+    if (writer->string_hash) {
+        _Py_hashtable_destroy(writer->string_hash);
+        writer->string_hash = NULL;
+    }
+    if (writer->strings) {
+        for (size_t i = 0; i < writer->string_count; i++) {
+            PyMem_Free(writer->strings[i]);
+        }
+        PyMem_Free(writer->strings);
+        writer->strings = NULL;
+    }
+    PyMem_Free(writer->string_lengths);
+    writer->string_lengths = NULL;
+    writer->string_count = 0;
+    writer->string_capacity = 0;
+
+    if (writer->frame_hash) {
+        _Py_hashtable_destroy(writer->frame_hash);
+        writer->frame_hash = NULL;
+    }
+    PyMem_Free(writer->frame_entries);
+    writer->frame_entries = NULL;
+    writer->frame_count = 0;
+    writer->frame_capacity = 0;
+
+    if (writer->thread_entries) {
+        for (size_t i = 0; i < writer->thread_count; i++) {
+            PyMem_Free(writer->thread_entries[i].prev_stack);
+            PyMem_Free(writer->thread_entries[i].pending_rle);
+        }
+        PyMem_Free(writer->thread_entries);
+        writer->thread_entries = NULL;
+    }
+    writer->thread_count = 0;
+    writer->thread_capacity = 0;
+
+    writer->total_samples = 0;
+}
+
+static int
+writer_init_chunk_state(BinaryWriter *writer)
+{
+    writer->string_hash = _Py_hashtable_new_full(
+        string_hash_func,
+        string_compare_func,
+        string_key_destroy,  /* Key destroy: decref the Python string */
+        NULL,                /* Value destroy: values are just indices, not pointers */
+        NULL                 /* Use default allocator */
+    );
+    if (!writer->string_hash) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    writer->strings = PyMem_Malloc(INITIAL_STRING_CAPACITY * sizeof(char *));
+    if (!writer->strings) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    writer->string_lengths = PyMem_Malloc(INITIAL_STRING_CAPACITY * sizeof(size_t));
+    if (!writer->string_lengths) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    writer->string_capacity = INITIAL_STRING_CAPACITY;
+
+    writer->frame_hash = _Py_hashtable_new_full(
+        frame_key_hash_func,
+        frame_key_compare_func,
+        frame_key_destroy,   /* Key destroy: free the FrameKey */
+        NULL,                /* Value destroy: values are just indices, not pointers */
+        NULL                 /* Use default allocator */
+    );
+    if (!writer->frame_hash) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    writer->frame_entries = PyMem_Malloc(INITIAL_FRAME_CAPACITY * sizeof(FrameEntry));
+    if (!writer->frame_entries) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    writer->frame_capacity = INITIAL_FRAME_CAPACITY;
+
+    writer->thread_entries = PyMem_Malloc(INITIAL_THREAD_CAPACITY * sizeof(ThreadEntry));
+    if (!writer->thread_entries) {
+        PyErr_NoMemory();
+        goto error;
+    }
+    writer->thread_capacity = INITIAL_THREAD_CAPACITY;
+
+    writer->total_samples = 0;
+    return 0;
+
+error:
+    writer_clear_chunk_state(writer);
+    return -1;
 }
 
 static inline int
@@ -622,6 +794,7 @@ flush_pending_rle(BinaryWriter *writer, ThreadEntry *entry)
             return -1;
         }
         writer->total_samples++;
+        writer->lifetime_samples++;
     }
 
     writer->stats.repeat_records++;
@@ -713,12 +886,13 @@ write_sample_with_encoding(BinaryWriter *writer, ThreadEntry *entry,
 
     writer->stats.total_frames_written += frames_written;
     writer->total_samples++;
+    writer->lifetime_samples++;
     return 0;
 }
 
 BinaryWriter *
 binary_writer_create(PyObject *path, uint64_t sample_interval_us, int compression_type,
-                     uint64_t start_time_us)
+                     uint64_t start_time_us, int chunked)
 {
     BinaryWriter *writer = PyMem_Calloc(1, sizeof(BinaryWriter));
     if (!writer) {
@@ -729,6 +903,7 @@ binary_writer_create(PyObject *path, uint64_t sample_interval_us, int compressio
     writer->start_time_us = start_time_us;
     writer->sample_interval_us = sample_interval_us;
     writer->compression_type = compression_type;
+    writer->chunked = chunked;
 
     writer->write_buffer = PyMem_Malloc(WRITE_BUFFER_SIZE);
     if (!writer->write_buffer) {
@@ -737,53 +912,9 @@ binary_writer_create(PyObject *path, uint64_t sample_interval_us, int compressio
     }
     writer->buffer_size = WRITE_BUFFER_SIZE;
 
-    writer->string_hash = _Py_hashtable_new_full(
-        string_hash_func,
-        string_compare_func,
-        string_key_destroy,  /* Key destroy: decref the Python string */
-        NULL,                /* Value destroy: values are just indices, not pointers */
-        NULL                 /* Use default allocator */
-    );
-    if (!writer->string_hash) {
-        PyErr_NoMemory();
+    if (writer_init_chunk_state(writer) < 0) {
         goto error;
     }
-    writer->strings = PyMem_Malloc(INITIAL_STRING_CAPACITY * sizeof(char *));
-    if (!writer->strings) {
-        PyErr_NoMemory();
-        goto error;
-    }
-    writer->string_lengths = PyMem_Malloc(INITIAL_STRING_CAPACITY * sizeof(size_t));
-    if (!writer->string_lengths) {
-        PyErr_NoMemory();
-        goto error;
-    }
-    writer->string_capacity = INITIAL_STRING_CAPACITY;
-
-    writer->frame_hash = _Py_hashtable_new_full(
-        frame_key_hash_func,
-        frame_key_compare_func,
-        frame_key_destroy,   /* Key destroy: free the FrameKey */
-        NULL,                /* Value destroy: values are just indices, not pointers */
-        NULL                 /* Use default allocator */
-    );
-    if (!writer->frame_hash) {
-        PyErr_NoMemory();
-        goto error;
-    }
-    writer->frame_entries = PyMem_Malloc(INITIAL_FRAME_CAPACITY * sizeof(FrameEntry));
-    if (!writer->frame_entries) {
-        PyErr_NoMemory();
-        goto error;
-    }
-    writer->frame_capacity = INITIAL_FRAME_CAPACITY;
-
-    writer->thread_entries = PyMem_Malloc(INITIAL_THREAD_CAPACITY * sizeof(ThreadEntry));
-    if (!writer->thread_entries) {
-        PyErr_NoMemory();
-        goto error;
-    }
-    writer->thread_capacity = INITIAL_THREAD_CAPACITY;
 
     if (compression_type == COMPRESSION_ZSTD) {
         if (writer_init_zstd(writer) < 0) {
@@ -810,12 +941,41 @@ binary_writer_create(PyObject *path, uint64_t sample_interval_us, int compressio
     if (fwrite_checked_allow_threads(header, FILE_HEADER_PLACEHOLDER_SIZE, writer->fp) < 0) {
         goto error;
     }
+    writer->chunk_open = 1;
+    writer->chunk_start_offset = 0;
 
     return writer;
 
 error:
     binary_writer_destroy(writer);
     return NULL;
+}
+
+static int
+writer_start_chunk(BinaryWriter *writer)
+{
+    if (writer->chunk_open) {
+        return 0;
+    }
+
+    file_offset_t chunk_start = FTELL64(writer->fp);
+    if (chunk_start < 0) {
+        PyErr_SetFromErrno(PyExc_IOError);
+        return -1;
+    }
+
+    if (writer_reset_zstd_stream(writer) < 0) {
+        return -1;
+    }
+
+    uint8_t header[FILE_HEADER_PLACEHOLDER_SIZE] = {0};
+    if (fwrite_checked_allow_threads(header, FILE_HEADER_PLACEHOLDER_SIZE, writer->fp) < 0) {
+        return -1;
+    }
+
+    writer->chunk_start_offset = (uint64_t)chunk_start;
+    writer->chunk_open = 1;
+    return 0;
 }
 
 /* Build a frame stack from Python frame list by interning all strings and frames.
@@ -999,6 +1159,10 @@ binary_writer_write_sample(BinaryWriter *writer, PyObject *stack_frames, uint64_
         return -1;
     }
 
+    if (writer->chunked && writer_start_chunk(writer) < 0) {
+        return -1;
+    }
+
     Py_ssize_t num_interpreters = PyList_GET_SIZE(stack_frames);
     for (Py_ssize_t i = 0; i < num_interpreters; i++) {
         PyObject *interp_info = PyList_GET_ITEM(stack_frames, i);
@@ -1031,8 +1195,8 @@ binary_writer_write_sample(BinaryWriter *writer, PyObject *stack_frames, uint64_
     return 0;
 }
 
-int
-binary_writer_finalize(BinaryWriter *writer)
+static int
+writer_flush_pending_rle_records(BinaryWriter *writer)
 {
     for (size_t i = 0; i < writer->thread_count; i++) {
         if (writer->thread_entries[i].has_pending_rle) {
@@ -1041,44 +1205,26 @@ binary_writer_finalize(BinaryWriter *writer)
             }
         }
     }
+    return 0;
+}
 
+static int
+writer_finish_sample_region(BinaryWriter *writer)
+{
     if (writer_flush_buffer(writer) < 0) {
         return -1;
     }
+    return writer_finish_zstd_stream(writer);
+}
 
-#ifdef HAVE_ZSTD
-    /* Finalize compression stream */
-    if (writer->compression_type == COMPRESSION_ZSTD && writer->zstd.cctx) {
-        ZSTD_inBuffer input = { NULL, 0, 0 };
-        size_t remaining;
-
-        do {
-            ZSTD_outBuffer output = {
-                writer->zstd.compressed_buffer,
-                writer->zstd.compressed_buffer_size,
-                0
-            };
-
-            remaining = ZSTD_compressStream2(writer->zstd.cctx, &output, &input, ZSTD_e_end);
-
-            if (ZSTD_isError(remaining)) {
-                PyErr_Format(PyExc_IOError, "zstd finalization error: %s",
-                             ZSTD_getErrorName(remaining));
-                return -1;
-            }
-
-            if (output.pos > 0) {
-                if (fwrite_checked_allow_threads(writer->zstd.compressed_buffer, output.pos, writer->fp) < 0) {
-                    return -1;
-                }
-            }
-        } while (remaining > 0);
-    }
-#endif
-
+static int
+writer_write_tables_and_footer(BinaryWriter *writer, uint64_t chunk_start,
+                               int chunked, uint64_t *string_table_offset,
+                               uint64_t *frame_table_offset, uint64_t *total_size)
+{
     /* Use 64-bit file position for >2GB files */
-    file_offset_t string_table_offset = FTELL64(writer->fp);
-    if (string_table_offset < 0) {
+    file_offset_t string_table_offset_abs = FTELL64(writer->fp);
+    if (string_table_offset_abs < 0) {
         PyErr_SetFromErrno(PyExc_IOError);
         return -1;
     }
@@ -1093,8 +1239,8 @@ binary_writer_finalize(BinaryWriter *writer)
         }
     }
 
-    file_offset_t frame_table_offset = FTELL64(writer->fp);
-    if (frame_table_offset < 0) {
+    file_offset_t frame_table_offset_abs = FTELL64(writer->fp);
+    if (frame_table_offset_abs < 0) {
         PyErr_SetFromErrno(PyExc_IOError);
         return -1;
     }
@@ -1133,13 +1279,15 @@ binary_writer_finalize(BinaryWriter *writer)
         }
     }
 
-    /* Footer: string_count(4) + frame_count(4) + file_size(8) + checksum(16) */
+    /* Footer: string_count(4) + frame_count(4) + file_size/chunk_size(8) + checksum(16) */
     file_offset_t footer_offset = FTELL64(writer->fp);
     if (footer_offset < 0) {
         PyErr_SetFromErrno(PyExc_IOError);
         return -1;
     }
-    uint64_t file_size = (uint64_t)footer_offset + FILE_FOOTER_SIZE;
+
+    uint64_t end_offset = (uint64_t)footer_offset + FILE_FOOTER_SIZE;
+    uint64_t file_or_chunk_size = chunked ? end_offset - chunk_start : end_offset;
     uint8_t footer[FILE_FOOTER_SIZE] = {0};
     /* Cast size_t to uint32_t before memcpy to ensure correct bytes are copied
      * on both little-endian and big-endian systems (size_t is 8 bytes on 64-bit) */
@@ -1147,27 +1295,40 @@ binary_writer_finalize(BinaryWriter *writer)
     uint32_t frame_count_u32 = (uint32_t)writer->frame_count;
     memcpy(footer + FTR_OFF_STRINGS, &string_count_u32, FTR_SIZE_STRINGS);
     memcpy(footer + FTR_OFF_FRAMES, &frame_count_u32, FTR_SIZE_FRAMES);
-    memcpy(footer + FTR_OFF_FILE_SIZE, &file_size, FTR_SIZE_FILE_SIZE);
+    memcpy(footer + FTR_OFF_FILE_SIZE, &file_or_chunk_size, FTR_SIZE_FILE_SIZE);
     /* checksum (FTR_OFF_CHECKSUM..FILE_FOOTER_SIZE-1): placeholder zeros */
     if (fwrite_checked_allow_threads(footer, FILE_FOOTER_SIZE, writer->fp) < 0) {
         return -1;
     }
 
-    if (FSEEK64(writer->fp, 0, SEEK_SET) < 0) {
+    *string_table_offset = (uint64_t)string_table_offset_abs;
+    *frame_table_offset = (uint64_t)frame_table_offset_abs;
+    *total_size = file_or_chunk_size;
+    return 0;
+}
+
+static int
+writer_patch_header(BinaryWriter *writer, uint64_t chunk_start,
+                    uint64_t string_table_offset, uint64_t frame_table_offset,
+                    uint64_t total_size, int chunked)
+{
+    if (FSEEK64(writer->fp, (file_offset_t)chunk_start, SEEK_SET) < 0) {
         PyErr_SetFromErrno(PyExc_IOError);
         return -1;
     }
 
     /* Convert file offsets and counts to fixed-width types for portable header format.
      * This ensures correct behavior on both little-endian and big-endian systems. */
-    uint64_t string_table_offset_u64 = (uint64_t)string_table_offset;
-    uint64_t frame_table_offset_u64 = (uint64_t)frame_table_offset;
+    uint64_t string_table_offset_u64 = chunked ?
+        string_table_offset - chunk_start : string_table_offset;
+    uint64_t frame_table_offset_u64 = chunked ?
+        frame_table_offset - chunk_start : frame_table_offset;
     uint32_t thread_count_u32 = (uint32_t)writer->thread_count;
     uint32_t compression_type_u32 = (uint32_t)writer->compression_type;
 
-    uint8_t header[FILE_HEADER_SIZE] = {0};
+    uint8_t header[FILE_HEADER_PLACEHOLDER_SIZE] = {0};
     uint32_t magic = BINARY_FORMAT_MAGIC;
-    uint32_t version = BINARY_FORMAT_VERSION;
+    uint32_t version = chunked ? BINARY_FORMAT_CHUNKED_VERSION : BINARY_FORMAT_VERSION;
     memcpy(header + HDR_OFF_MAGIC, &magic, HDR_SIZE_MAGIC);
     memcpy(header + HDR_OFF_VERSION, &version, HDR_SIZE_VERSION);
     header[HDR_OFF_PY_MAJOR] = PY_MAJOR_VERSION;
@@ -1180,18 +1341,116 @@ binary_writer_finalize(BinaryWriter *writer)
     memcpy(header + HDR_OFF_STR_TABLE, &string_table_offset_u64, HDR_SIZE_STR_TABLE);
     memcpy(header + HDR_OFF_FRAME_TABLE, &frame_table_offset_u64, HDR_SIZE_FRAME_TABLE);
     memcpy(header + HDR_OFF_COMPRESSION, &compression_type_u32, HDR_SIZE_COMPRESSION);
-    if (fwrite_checked_allow_threads(header, FILE_HEADER_SIZE, writer->fp) < 0) {
-        return -1;
+    if (chunked) {
+        memcpy(header + HDR_OFF_CHUNK_SIZE, &total_size, HDR_SIZE_CHUNK_SIZE);
     }
 
-    if (Py_fclose(writer->fp) != 0) {
-        writer->fp = NULL;
-        PyErr_SetFromErrno(PyExc_IOError);
+    size_t header_size = chunked ? FILE_HEADER_PLACEHOLDER_SIZE : FILE_HEADER_SIZE;
+    if (fwrite_checked_allow_threads(header, header_size, writer->fp) < 0) {
         return -1;
     }
-    writer->fp = NULL;
 
     return 0;
+}
+
+static int
+writer_commit_chunk(BinaryWriter *writer, int close_file)
+{
+    uint64_t chunk_start = writer->chunked ? writer->chunk_start_offset : 0;
+    uint64_t string_table_offset, frame_table_offset, total_size;
+
+    if (writer_flush_pending_rle_records(writer) < 0) {
+        return -1;
+    }
+    if (writer_finish_sample_region(writer) < 0) {
+        return -1;
+    }
+    if (writer_write_tables_and_footer(writer, chunk_start, writer->chunked,
+                                       &string_table_offset, &frame_table_offset,
+                                       &total_size) < 0) {
+        return -1;
+    }
+
+    if (writer->chunked && fflush_checked_allow_threads(writer->fp) < 0) {
+        return -1;
+    }
+
+    if (writer_patch_header(writer, chunk_start, string_table_offset,
+                            frame_table_offset, total_size, writer->chunked) < 0) {
+        return -1;
+    }
+
+    if (writer->chunked && fflush_checked_allow_threads(writer->fp) < 0) {
+        return -1;
+    }
+
+    if (close_file) {
+        if (Py_fclose(writer->fp) != 0) {
+            writer->fp = NULL;
+            PyErr_SetFromErrno(PyExc_IOError);
+            return -1;
+        }
+        writer->fp = NULL;
+    }
+    else {
+        uint64_t end_offset = writer->chunked ? chunk_start + total_size : total_size;
+        if (FSEEK64(writer->fp, (file_offset_t)end_offset, SEEK_SET) < 0) {
+            PyErr_SetFromErrno(PyExc_IOError);
+            return -1;
+        }
+        writer_clear_chunk_state(writer);
+        if (writer_init_chunk_state(writer) < 0) {
+            return -1;
+        }
+        writer->chunk_open = 0;
+    }
+
+    return 0;
+}
+
+int
+binary_writer_flush_chunk(BinaryWriter *writer)
+{
+    if (!writer->chunked) {
+        PyErr_SetString(PyExc_ValueError, "Binary writer was not opened in chunked mode");
+        return -1;
+    }
+    if (!writer->chunk_open) {
+        return 0;
+    }
+    return writer_commit_chunk(writer, 0);
+}
+
+int
+binary_writer_finalize(BinaryWriter *writer)
+{
+    if (writer->chunked) {
+        if (writer->chunk_open) {
+            if (writer_commit_chunk(writer, 1) < 0) {
+                return -1;
+            }
+        }
+        else if (writer->fp) {
+            if (Py_fclose(writer->fp) != 0) {
+                writer->fp = NULL;
+                PyErr_SetFromErrno(PyExc_IOError);
+                return -1;
+            }
+            writer->fp = NULL;
+        }
+        return 0;
+    }
+
+    return writer_commit_chunk(writer, 1);
+}
+
+uint64_t
+binary_writer_total_samples(BinaryWriter *writer)
+{
+    if (!writer->chunked) {
+        return writer->total_samples;
+    }
+    return writer->lifetime_samples;
 }
 
 void
