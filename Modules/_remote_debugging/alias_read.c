@@ -92,13 +92,7 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
 
     uint64_t start_tvsec = 0;
     uint64_t start_tvusec = 0;
-    uint64_t reprobe_tvsec = 0;
-    uint64_t reprobe_tvusec = 0;
-    if (read_target_identity(unwinder, &start_tvsec, &start_tvusec) < 0
-            || read_target_identity(unwinder, &reprobe_tvsec,
-                                    &reprobe_tvusec) < 0
-            || start_tvsec != reprobe_tvsec
-            || start_tvusec != reprobe_tvusec) {
+    if (read_target_identity(unwinder, &start_tvsec, &start_tvusec) < 0) {
         cache->disabled_at_init = 1;
     }
     else {
