@@ -18,8 +18,7 @@ alias_direct_read(RemoteUnwinderObject *unwinder,
 
 static int
 read_target_identity(RemoteUnwinderObject *unwinder,
-                     uint64_t *start_tvsec,
-                     uint64_t *start_tvusec)
+                     uint64_t *start_tvsec)
 {
     struct proc_bsdinfo info;
     int n = proc_pidinfo(unwinder->handle.pid, PROC_PIDTBSDINFO, 0,
@@ -27,11 +26,10 @@ read_target_identity(RemoteUnwinderObject *unwinder,
     if (n != (int)sizeof(info)) {
         return -1;
     }
-    if (info.pbi_start_tvsec == 0 && info.pbi_start_tvusec == 0) {
+    if (info.pbi_start_tvsec == 0) {
         return -1;
     }
     *start_tvsec = (uint64_t)info.pbi_start_tvsec;
-    *start_tvusec = (uint64_t)info.pbi_start_tvusec;
     return 0;
 }
 
@@ -77,8 +75,7 @@ _Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwinder,
         if (entry->valid
                 && entry->remote_page_base == page_base
                 && entry->task_port == unwinder->handle.task
-                && entry->target_start_tvsec == cache->target_start_tvsec
-                && entry->target_start_tvusec == cache->target_start_tvusec) {
+                && entry->target_start_tvsec == cache->target_start_tvsec) {
             alias_deallocate_entry(entry);
         }
     }
@@ -91,13 +88,11 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
     memset(cache, 0, sizeof(*cache));
 
     uint64_t start_tvsec = 0;
-    uint64_t start_tvusec = 0;
-    if (read_target_identity(unwinder, &start_tvsec, &start_tvusec) < 0) {
+    if (read_target_identity(unwinder, &start_tvsec) < 0) {
         cache->disabled_at_init = 1;
     }
     else {
         cache->target_start_tvsec = start_tvsec;
-        cache->target_start_tvusec = start_tvusec;
     }
     unwinder->stats.alias_disabled_at_init =
         (uint64_t)cache->disabled_at_init;
@@ -108,12 +103,10 @@ alias_identity_matches(RemoteUnwinderObject *unwinder)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
     uint64_t start_tvsec = 0;
-    uint64_t start_tvusec = 0;
-    if (read_target_identity(unwinder, &start_tvsec, &start_tvusec) < 0) {
+    if (read_target_identity(unwinder, &start_tvsec) < 0) {
         return 0;
     }
-    return start_tvsec == cache->target_start_tvsec
-        && start_tvusec == cache->target_start_tvusec;
+    return start_tvsec == cache->target_start_tvsec;
 }
 
 static int
@@ -165,8 +158,7 @@ alias_find_entry(RemoteUnwinderObject *unwinder, uintptr_t page_base)
         if (entry->valid
                 && entry->remote_page_base == page_base
                 && entry->task_port == unwinder->handle.task
-                && entry->target_start_tvsec == cache->target_start_tvsec
-                && entry->target_start_tvusec == cache->target_start_tvusec) {
+                && entry->target_start_tvsec == cache->target_start_tvsec) {
             return entry;
         }
     }
@@ -246,7 +238,6 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
     entry->size = page_size;
     entry->task_port = unwinder->handle.task;
     entry->target_start_tvsec = cache->target_start_tvsec;
-    entry->target_start_tvusec = cache->target_start_tvusec;
     entry->access_seq = ++cache->access_seq;
     entry->valid = 1;
 
