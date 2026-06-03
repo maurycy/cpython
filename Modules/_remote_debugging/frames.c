@@ -346,7 +346,7 @@ parse_frame_object_aliased(
 {
     char frame[SIZEOF_INTERP_FRAME];
     if (_Py_RemoteDebug_AliasedRead(
-            unwinder, ALIAS_FRAME_PAGE, address, SIZEOF_INTERP_FRAME,
+            unwinder, address, SIZEOF_INTERP_FRAME,
             frame) < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError,
                             "Failed to read interpreter frame");
