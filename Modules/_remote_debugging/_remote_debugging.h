@@ -272,8 +272,6 @@ typedef struct {
     uintptr_t remote_page_base;
     mach_vm_address_t local_page_base;
     mach_vm_size_t size;
-    mach_port_t task_port;
-    uint64_t target_start_tvsec;
     uint64_t access_seq;
     int valid;
 } AliasPageEntry;
