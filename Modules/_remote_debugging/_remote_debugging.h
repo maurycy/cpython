@@ -263,12 +263,6 @@ typedef struct {
 } RemoteReadPrefetch;
 
 #if defined(__APPLE__) && TARGET_OS_OSX
-typedef enum {
-    ALIAS_STABLE_RUNTIME,
-    ALIAS_TSTATE,
-    ALIAS_FRAME_PAGE
-} AliasReadKind;
-
 #define MAX_ALIAS_PAGES 256
 #define ALIAS_PROBE_MASK 0x3ff
 #define ALIAS_FAILURE_WINDOW 100
@@ -719,7 +713,6 @@ extern int _Py_RemoteDebug_ValidateThreadStateSnapshot(
 );
 extern int _Py_RemoteDebug_AliasedRead(
     RemoteUnwinderObject *unwinder,
-    AliasReadKind kind,
     uintptr_t remote_addr,
     size_t len,
     void *dst);

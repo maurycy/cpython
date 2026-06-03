@@ -619,7 +619,6 @@ read_interp_state_and_maybe_thread_frame(
     if (unwinder->cache_frames) {
         if (_Py_RemoteDebug_AliasedRead(
                 unwinder,
-                ALIAS_STABLE_RUNTIME,
                 interpreter_addr,
                 INTERP_STATE_BUFFER_SIZE,
                 interp_state_buffer) < 0) {

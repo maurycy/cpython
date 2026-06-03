@@ -305,7 +305,6 @@ read_thread_state_and_maybe_frame(
     if (unwinder->cache_frames) {
         if (_Py_RemoteDebug_AliasedRead(
                 unwinder,
-                ALIAS_TSTATE,
                 tstate_addr,
                 tstate_size,
                 tstate_buffer) < 0) {
