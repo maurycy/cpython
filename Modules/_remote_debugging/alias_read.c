@@ -313,12 +313,10 @@ _Py_RemoteDebug_AliasProbe(RemoteUnwinderObject *unwinder,
 
 int
 _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
-                            AliasReadKind kind,
                             uintptr_t remote_addr,
                             size_t len,
                             void *dst)
 {
-    (void)kind;
     AliasReadCache *cache = &unwinder->alias_cache;
     if (len == 0) {
         return 0;
