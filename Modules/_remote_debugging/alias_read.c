@@ -72,10 +72,7 @@ _Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwinder,
 
     for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
         AliasPageEntry *entry = &cache->pages[i];
-        if (entry->valid
-                && entry->remote_page_base == page_base
-                && entry->task_port == unwinder->handle.task
-                && entry->target_start_tvsec == cache->target_start_tvsec) {
+        if (entry->valid && entry->remote_page_base == page_base) {
             alias_deallocate_entry(entry);
         }
     }
@@ -155,10 +152,7 @@ alias_find_entry(RemoteUnwinderObject *unwinder, uintptr_t page_base)
     AliasReadCache *cache = &unwinder->alias_cache;
     for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
         AliasPageEntry *entry = &cache->pages[i];
-        if (entry->valid
-                && entry->remote_page_base == page_base
-                && entry->task_port == unwinder->handle.task
-                && entry->target_start_tvsec == cache->target_start_tvsec) {
+        if (entry->valid && entry->remote_page_base == page_base) {
             return entry;
         }
     }
@@ -236,8 +230,6 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
     entry->remote_page_base = page_base;
     entry->local_page_base = local_addr;
     entry->size = page_size;
-    entry->task_port = unwinder->handle.task;
-    entry->target_start_tvsec = cache->target_start_tvsec;
     entry->access_seq = ++cache->access_seq;
     entry->valid = 1;
 
