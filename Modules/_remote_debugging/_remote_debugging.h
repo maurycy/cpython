@@ -285,8 +285,7 @@ typedef struct {
     uint32_t remap_failure_samples;
     uint32_t remap_failure_count;
     unsigned char remap_failure_window[ALIAS_FAILURE_WINDOW];
-    int disabled_at_init;
-    int disabled_at_runtime;
+    int disabled;
 } AliasReadCache;
 #endif
 
