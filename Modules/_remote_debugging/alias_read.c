@@ -110,31 +110,6 @@ alias_maybe_probe_identity(RemoteUnwinderObject *unwinder)
     return 0;
 }
 
-static void
-alias_record_remap_outcome(RemoteUnwinderObject *unwinder, int failed)
-{
-    AliasReadCache *cache = &unwinder->alias_cache;
-    unsigned char old = cache->remap_failure_window[cache->remap_failure_index];
-    if (old) {
-        cache->remap_failure_count--;
-    }
-    cache->remap_failure_window[cache->remap_failure_index] =
-        (unsigned char)(failed != 0);
-    if (failed) {
-        cache->remap_failure_count++;
-    }
-    cache->remap_failure_index =
-        (cache->remap_failure_index + 1) % ALIAS_FAILURE_WINDOW;
-    if (cache->remap_failure_samples < ALIAS_FAILURE_WINDOW) {
-        cache->remap_failure_samples++;
-    }
-
-    if (cache->remap_failure_samples == ALIAS_FAILURE_WINDOW
-            && cache->remap_failure_count >= ALIAS_FAILURE_THRESHOLD) {
-        alias_disable_runtime(unwinder);
-    }
-}
-
 static AliasPageEntry *
 alias_find_entry(RemoteUnwinderObject *unwinder, uintptr_t page_base)
 {
@@ -195,13 +170,13 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
         VM_INHERIT_NONE);
     if (kr != KERN_SUCCESS) {
         STATS_INC(unwinder, alias_remap_failures);
-        alias_record_remap_outcome(unwinder, 1);
+        alias_disable_runtime(unwinder);
         return -1;
     }
     if ((cur_protection & VM_PROT_READ) == 0) {
         (void)mach_vm_deallocate(mach_task_self(), local_addr, page_size);
         STATS_INC(unwinder, alias_remap_failures);
-        alias_record_remap_outcome(unwinder, 1);
+        alias_disable_runtime(unwinder);
         return -1;
     }
 
@@ -210,19 +185,17 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
     if (kr != KERN_SUCCESS) {
         (void)mach_vm_deallocate(mach_task_self(), local_addr, page_size);
         STATS_INC(unwinder, alias_remap_failures);
-        alias_record_remap_outcome(unwinder, 1);
+        alias_disable_runtime(unwinder);
         return -1;
     }
 
     AliasPageEntry *entry = alias_alloc_entry(unwinder);
-    memset(entry, 0, sizeof(*entry));
     entry->remote_page_base = page_base;
     entry->local_page_base = local_addr;
     entry->size = page_size;
     entry->access_seq = ++cache->access_seq;
     entry->valid = 1;
 
-    alias_record_remap_outcome(unwinder, 0);
     *entry_out = entry;
     return 0;
 }
@@ -259,7 +232,6 @@ _Py_RemoteDebug_AliasProbe(RemoteUnwinderObject *unwinder,
                                      (mach_vm_size_t)page_size);
         }
         STATS_INC(unwinder, alias_remap_failures);
-        alias_record_remap_outcome(unwinder, 1);
         return -1;
     }
 
@@ -269,11 +241,9 @@ _Py_RemoteDebug_AliasProbe(RemoteUnwinderObject *unwinder,
                              (mach_vm_size_t)page_size);
     if (kr != KERN_SUCCESS) {
         STATS_INC(unwinder, alias_remap_failures);
-        alias_record_remap_outcome(unwinder, 1);
         return -1;
     }
 
-    alias_record_remap_outcome(unwinder, 0);
     return 0;
 }
 
