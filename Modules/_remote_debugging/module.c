@@ -429,7 +429,10 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
         return -1;
     }
 #if defined(__APPLE__) && TARGET_OS_OSX
-    (void)_Py_RemoteDebug_AliasProbe(self, self->interpreter_addr);
+    if (_Py_RemoteDebug_AliasProbe(self, self->interpreter_addr) < 0) {
+        self->alias_cache.disabled_at_init = 1;
+        self->stats.alias_disabled_at_init = 1;
+    }
 #endif
 
     self->code_object_cache = _Py_hashtable_new_full(
