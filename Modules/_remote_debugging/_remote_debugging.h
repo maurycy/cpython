@@ -283,7 +283,6 @@ typedef struct {
     mach_vm_size_t size;
     mach_port_t task_port;
     uint64_t target_start_tvsec;
-    uint64_t target_start_tvusec;
     uint64_t access_seq;
     int valid;
 } AliasPageEntry;
@@ -292,7 +291,6 @@ typedef struct {
     AliasPageEntry pages[MAX_ALIAS_PAGES];
     uint64_t access_seq;
     uint64_t target_start_tvsec;
-    uint64_t target_start_tvusec;
     uint32_t probe_counter;
     uint32_t remap_failure_index;
     uint32_t remap_failure_samples;
