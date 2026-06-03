@@ -34,6 +34,19 @@ alias_deallocate_entry(AliasPageEntry *entry)
     memset(entry, 0, sizeof(*entry));
 }
 
+static AliasPageEntry *
+alias_find_entry(RemoteUnwinderObject *unwinder, uintptr_t page_base)
+{
+    AliasReadCache *cache = &unwinder->alias_cache;
+    for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
+        AliasPageEntry *entry = &cache->pages[i];
+        if (entry->valid && entry->remote_page_base == page_base) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
 void
 _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder)
 {
@@ -56,15 +69,11 @@ void
 _Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwinder,
                                          uintptr_t remote_addr)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
     size_t page_size = (size_t)unwinder->handle.page_size;
     uintptr_t page_base = remote_addr & ~(uintptr_t)(page_size - 1);
-
-    for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
-        AliasPageEntry *entry = &cache->pages[i];
-        if (entry->valid && entry->remote_page_base == page_base) {
-            alias_deallocate_entry(entry);
-        }
+    AliasPageEntry *entry;
+    while ((entry = alias_find_entry(unwinder, page_base)) != NULL) {
+        alias_deallocate_entry(entry);
     }
 }
 
@@ -108,19 +117,6 @@ alias_maybe_probe_identity(RemoteUnwinderObject *unwinder)
     STATS_INC(unwinder, alias_identity_mismatches);
     alias_disable_runtime(unwinder);
     return 0;
-}
-
-static AliasPageEntry *
-alias_find_entry(RemoteUnwinderObject *unwinder, uintptr_t page_base)
-{
-    AliasReadCache *cache = &unwinder->alias_cache;
-    for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
-        AliasPageEntry *entry = &cache->pages[i];
-        if (entry->valid && entry->remote_page_base == page_base) {
-            return entry;
-        }
-    }
-    return NULL;
 }
 
 static AliasPageEntry *
