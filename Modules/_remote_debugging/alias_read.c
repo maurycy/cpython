@@ -7,16 +7,6 @@
 #endif
 
 static int
-alias_direct_read(RemoteUnwinderObject *unwinder,
-                  uintptr_t remote_addr,
-                  size_t len,
-                  void *dst)
-{
-    return _Py_RemoteDebug_ReadRemoteMemory(
-        &unwinder->handle, remote_addr, len, dst);
-}
-
-static int
 read_target_identity(RemoteUnwinderObject *unwinder,
                      uint64_t *start_tvsec)
 {
@@ -57,7 +47,7 @@ static void
 alias_disable_runtime(RemoteUnwinderObject *unwinder)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
-    cache->disabled_at_runtime = 1;
+    cache->disabled = 1;
     unwinder->stats.alias_disabled_at_runtime = 1;
     _Py_RemoteDebug_AliasCacheClear(unwinder);
 }
@@ -86,13 +76,12 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
 
     uint64_t start_tvsec = 0;
     if (read_target_identity(unwinder, &start_tvsec) < 0) {
-        cache->disabled_at_init = 1;
+        cache->disabled = 1;
+        unwinder->stats.alias_disabled_at_init = 1;
     }
     else {
         cache->target_start_tvsec = start_tvsec;
     }
-    unwinder->stats.alias_disabled_at_init =
-        (uint64_t)cache->disabled_at_init;
 }
 
 static int
@@ -243,7 +232,7 @@ _Py_RemoteDebug_AliasProbe(RemoteUnwinderObject *unwinder,
                            uintptr_t probe_addr)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
-    if (cache->disabled_at_init || cache->disabled_at_runtime) {
+    if (cache->disabled) {
         return -1;
     }
 
@@ -298,21 +287,24 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
     if (len == 0) {
         return 0;
     }
-    if (cache->disabled_at_init || cache->disabled_at_runtime) {
-        return alias_direct_read(unwinder, remote_addr, len, dst);
+    if (cache->disabled) {
+        return _Py_RemoteDebug_ReadRemoteMemory(
+            &unwinder->handle, remote_addr, len, dst);
     }
 
     size_t page_size = (size_t)unwinder->handle.page_size;
     uintptr_t page_base = remote_addr & ~(uintptr_t)(page_size - 1);
     size_t offset = (size_t)(remote_addr - page_base);
     if (offset >= page_size || len > page_size - offset) {
-        return alias_direct_read(unwinder, remote_addr, len, dst);
+        return _Py_RemoteDebug_ReadRemoteMemory(
+            &unwinder->handle, remote_addr, len, dst);
     }
 
     AliasPageEntry *entry = alias_find_entry(unwinder, page_base);
     if (entry != NULL) {
         if (!alias_maybe_probe_identity(unwinder)) {
-            return alias_direct_read(unwinder, remote_addr, len, dst);
+            return _Py_RemoteDebug_ReadRemoteMemory(
+                &unwinder->handle, remote_addr, len, dst);
         }
         entry->access_seq = ++cache->access_seq;
         memcpy(dst, (const char *)entry->local_page_base + offset, len);
@@ -322,10 +314,8 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
 
     STATS_INC(unwinder, alias_misses);
     if (alias_remap_page(unwinder, page_base, &entry) < 0) {
-        return alias_direct_read(unwinder, remote_addr, len, dst);
-    }
-    if (cache->disabled_at_runtime) {
-        return alias_direct_read(unwinder, remote_addr, len, dst);
+        return _Py_RemoteDebug_ReadRemoteMemory(
+            &unwinder->handle, remote_addr, len, dst);
     }
     memcpy(dst, (const char *)entry->local_page_base + offset, len);
     return 0;
