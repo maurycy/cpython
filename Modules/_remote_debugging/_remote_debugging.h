@@ -265,8 +265,6 @@ typedef struct {
 #if defined(__APPLE__) && TARGET_OS_OSX
 #define MAX_ALIAS_PAGES 256
 #define ALIAS_PROBE_MASK 0x3ff
-#define ALIAS_FAILURE_WINDOW 100
-#define ALIAS_FAILURE_THRESHOLD 10
 
 typedef struct {
     uintptr_t remote_page_base;
@@ -281,10 +279,6 @@ typedef struct {
     uint64_t access_seq;
     uint64_t target_start_tvsec;
     uint32_t probe_counter;
-    uint32_t remap_failure_index;
-    uint32_t remap_failure_samples;
-    uint32_t remap_failure_count;
-    unsigned char remap_failure_window[ALIAS_FAILURE_WINDOW];
     int disabled;
 } AliasReadCache;
 #endif
