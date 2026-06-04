@@ -61,7 +61,6 @@ alias_disable_runtime(RemoteUnwinderObject *unwinder)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
     cache->disabled = 1;
-    unwinder->stats.alias_disabled_at_runtime = 1;
     _Py_RemoteDebug_AliasCacheClear(unwinder);
 }
 
@@ -86,7 +85,6 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
     uint64_t start_tvsec = 0;
     if (read_target_identity(unwinder, &start_tvsec) < 0) {
         cache->disabled = 1;
-        unwinder->stats.alias_disabled_at_init = 1;
     }
     else {
         cache->target_start_tvsec = start_tvsec;
