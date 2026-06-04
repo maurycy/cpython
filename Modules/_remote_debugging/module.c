@@ -428,11 +428,6 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
         set_exception_cause(self, PyExc_RuntimeError, "Failed to populate initial state data");
         return -1;
     }
-#if defined(__APPLE__) && TARGET_OS_OSX
-    if (_Py_RemoteDebug_AliasProbe(self, self->interpreter_addr) < 0) {
-        self->alias_cache.disabled = 1;
-    }
-#endif
 
     self->code_object_cache = _Py_hashtable_new_full(
         _Py_hashtable_hash_ptr,

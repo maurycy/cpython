@@ -706,7 +706,6 @@ extern int _Py_RemoteDebug_AliasedRead(
 extern void _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder);
 extern void _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder);
 extern void _Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwinder, uintptr_t remote_addr);
-extern int _Py_RemoteDebug_AliasProbe(RemoteUnwinderObject *unwinder, uintptr_t probe_addr);
 #endif
 
 /* ============================================================================
