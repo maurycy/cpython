@@ -683,7 +683,6 @@ try_full_cache_hit(
     PyObject *current_frame = NULL;
     uintptr_t code_object_addr = 0;
     uintptr_t previous_frame = 0;
-    uintptr_t expected_parent = entry->num_addrs >= 2 ? entry->addrs[1] : 0;
     int parse_result;
     if (ctx->prefetch.frame && ctx->prefetch.frame_addr == ctx->frame_addr) {
         parse_result = parse_frame_buffer(unwinder, &current_frame,
@@ -693,6 +692,8 @@ try_full_cache_hit(
     else {
 #if defined(__APPLE__) && TARGET_OS_OSX
         if (unwinder->cache_frames) {
+            uintptr_t expected_parent =
+                entry->num_addrs >= 2 ? entry->addrs[1] : 0;
             parse_result = parse_frame_object_aliased(
                 unwinder, expected_parent, &current_frame, ctx->frame_addr,
                 &code_object_addr, &previous_frame);
