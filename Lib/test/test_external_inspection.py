@@ -3778,8 +3778,6 @@ recurse({depth})
             "alias_validation_fails",
             "alias_evictions",
             "alias_identity_mismatches",
-            "alias_disabled_at_init",
-            "alias_disabled_at_runtime",
             "batched_read_success_rate",
             "batched_read_segment_completion_rate",
         ]

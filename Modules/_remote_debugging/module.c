@@ -431,7 +431,6 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
 #if defined(__APPLE__) && TARGET_OS_OSX
     if (_Py_RemoteDebug_AliasProbe(self, self->interpreter_addr) < 0) {
         self->alias_cache.disabled = 1;
-        self->stats.alias_disabled_at_init = 1;
     }
 #endif
 
@@ -1155,10 +1154,6 @@ Returns:
         - alias_evictions: macOS alias-cache LRU evictions
         - alias_identity_mismatches: macOS target identity
           mismatches
-        - alias_disabled_at_init: Whether aliasing was disabled
-          during initialization
-        - alias_disabled_at_runtime: Whether aliasing was disabled
-          at runtime
         - frame_cache_hit_rate: Percentage of samples that hit the
           cache
         - code_object_cache_hit_rate: Percentage of code object
@@ -1174,7 +1169,7 @@ Raises:
 
 static PyObject *
 _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
-/*[clinic end generated code: output=21e36477122be2a0 input=4407dc8956eadfa3]*/
+/*[clinic end generated code: output=21e36477122be2a0 input=17992a9cb30c6add]*/
 {
     if (!self->collect_stats) {
         PyErr_SetString(PyExc_RuntimeError,
@@ -1220,8 +1215,6 @@ _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
     ADD_STAT(alias_validation_fails);
     ADD_STAT(alias_evictions);
     ADD_STAT(alias_identity_mismatches);
-    ADD_STAT(alias_disabled_at_init);
-    ADD_STAT(alias_disabled_at_runtime);
 
 #undef ADD_STAT
 

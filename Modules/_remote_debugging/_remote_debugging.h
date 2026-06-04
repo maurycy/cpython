@@ -307,8 +307,6 @@ typedef struct {
     uint64_t alias_validation_fails;         // macOS alias snapshot validation failures
     uint64_t alias_evictions;                // macOS alias-cache LRU evictions
     uint64_t alias_identity_mismatches;      // macOS target identity mismatches
-    uint64_t alias_disabled_at_init;         // macOS aliasing disabled during init (0/1)
-    uint64_t alias_disabled_at_runtime;      // macOS aliasing disabled at runtime (0/1)
 } UnwinderStats;
 
 #if defined(__GNUC__) || defined(__clang__)
