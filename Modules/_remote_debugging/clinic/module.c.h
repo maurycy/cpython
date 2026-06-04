@@ -428,8 +428,9 @@ PyDoc_STRVAR(_remote_debugging_RemoteUnwinder_get_stats__doc__,
 "        - frames_read_from_cache: Total frames retrieved from cache\n"
 "        - frames_read_from_memory: Total frames read from remote\n"
 "          memory\n"
-"        - memory_reads: Total remote memory read operations\n"
-"        - memory_bytes_read: Total bytes read from remote memory\n"
+"        - memory_reads: Legacy logical remote memory read operations\n"
+"        - memory_bytes_read: Legacy logical bytes read from remote\n"
+"          memory\n"
 "        - code_object_cache_hits: Code object cache hits\n"
 "        - code_object_cache_misses: Code object cache misses\n"
 "        - stale_cache_invalidations: Times stale cache entries were\n"
@@ -443,6 +444,23 @@ PyDoc_STRVAR(_remote_debugging_RemoteUnwinder_get_stats__doc__,
 "          batched reads\n"
 "        - batched_read_segments_completed: Segments completed by\n"
 "          batched reads\n"
+"        - alias_hits: macOS alias-cache hits\n"
+"        - alias_misses: macOS alias-cache misses\n"
+"        - alias_read_requests: macOS alias-read attempts\n"
+"        - alias_read_bytes_requested: Logical alias bytes requested\n"
+"        - alias_hit_bytes: Logical bytes served from alias cache\n"
+"        - alias_miss_bytes: Logical bytes served after alias miss\n"
+"        - alias_bypass_reads: Alias reads bypassed to direct reads\n"
+"        - alias_bypass_bytes: Logical alias bytes bypassed\n"
+"        - alias_remap_failures: macOS remap/protect failures\n"
+"        - alias_validation_fails: macOS alias snapshot validation\n"
+"          failures\n"
+"        - alias_evictions: macOS alias-cache LRU evictions\n"
+"        - alias_identity_mismatches: macOS identity mismatches\n"
+"        - alias_disabled_at_init: Whether aliasing was disabled\n"
+"          during initialization\n"
+"        - alias_disabled_at_runtime: Whether aliasing was disabled\n"
+"          at runtime\n"
 "        - frame_cache_hit_rate: Percentage of samples that hit the\n"
 "          cache\n"
 "        - code_object_cache_hit_rate: Percentage of code object\n"
@@ -1588,4 +1606,4 @@ skip_optional_kwonly:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=a3df14a6ab7f2998 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=d8574799160b6301 input=a9049054013a1b77]*/

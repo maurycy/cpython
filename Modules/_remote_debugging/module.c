@@ -490,6 +490,12 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
         clear_last_profiled_frames(self);
     }
 
+    if (stats) {
+        _Py_RemoteDebug_ClearCache(&self->handle);
+        memset(&self->stats.read_stats, 0, sizeof(self->stats.read_stats));
+        self->handle.read_stats = &self->stats.read_stats;
+    }
+
     return 0;
 }
 
@@ -1132,8 +1138,9 @@ Returns:
         - frames_read_from_cache: Total frames retrieved from cache
         - frames_read_from_memory: Total frames read from remote
           memory
-        - memory_reads: Total remote memory read operations
-        - memory_bytes_read: Total bytes read from remote memory
+        - memory_reads: Legacy logical remote memory read operations
+        - memory_bytes_read: Legacy logical bytes read from remote
+          memory
         - code_object_cache_hits: Code object cache hits
         - code_object_cache_misses: Code object cache misses
         - stale_cache_invalidations: Times stale cache entries were
@@ -1149,11 +1156,17 @@ Returns:
           batched reads
         - alias_hits: macOS alias-cache hits
         - alias_misses: macOS alias-cache misses
+        - alias_read_requests: macOS alias-read attempts
+        - alias_read_bytes_requested: Logical alias bytes requested
+        - alias_hit_bytes: Logical bytes served from alias cache
+        - alias_miss_bytes: Logical bytes served after alias miss
+        - alias_bypass_reads: Alias reads bypassed to direct reads
+        - alias_bypass_bytes: Logical alias bytes bypassed
         - alias_remap_failures: macOS remap/protect failures
         - alias_validation_fails: macOS alias snapshot validation
           failures
         - alias_evictions: macOS alias-cache LRU evictions
-        - alias_identity_mismatches: macOS target identity mismatches
+        - alias_identity_mismatches: macOS identity mismatches
         - alias_disabled_at_init: Whether aliasing was disabled
           during initialization
         - alias_disabled_at_runtime: Whether aliasing was disabled
@@ -1173,7 +1186,7 @@ Raises:
 
 static PyObject *
 _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
-/*[clinic end generated code: output=21e36477122be2a0 input=87905c65038fb06e]*/
+/*[clinic end generated code: output=21e36477122be2a0 input=c39cabc4fc55bca1]*/
 {
     if (!self->collect_stats) {
         PyErr_SetString(PyExc_RuntimeError,
@@ -1215,6 +1228,12 @@ _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
     ADD_STAT(batched_read_segments_completed);
     ADD_STAT(alias_hits);
     ADD_STAT(alias_misses);
+    ADD_STAT(alias_read_requests);
+    ADD_STAT(alias_read_bytes_requested);
+    ADD_STAT(alias_hit_bytes);
+    ADD_STAT(alias_miss_bytes);
+    ADD_STAT(alias_bypass_reads);
+    ADD_STAT(alias_bypass_bytes);
     ADD_STAT(alias_remap_failures);
     ADD_STAT(alias_validation_fails);
     ADD_STAT(alias_evictions);
@@ -1223,6 +1242,41 @@ _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
     ADD_STAT(alias_disabled_at_runtime);
 
 #undef ADD_STAT
+
+#define ADD_READ_STAT(name) do { \
+    PyObject *val = PyLong_FromUnsignedLongLong(self->stats.read_stats.name); \
+    if (!val || PyDict_SetItemString(result, #name, val) < 0) { \
+        Py_XDECREF(val); \
+        Py_DECREF(result); \
+        return NULL; \
+    } \
+    Py_DECREF(val); \
+} while(0)
+
+    ADD_READ_STAT(remote_read_syscalls);
+    ADD_READ_STAT(remote_read_syscall_failures);
+    ADD_READ_STAT(remote_read_bytes_requested);
+    ADD_READ_STAT(remote_read_bytes_completed);
+    ADD_READ_STAT(remote_read_single_syscalls);
+    ADD_READ_STAT(remote_read_single_bytes_requested);
+    ADD_READ_STAT(remote_read_single_bytes_completed);
+    ADD_READ_STAT(remote_read_batched_syscalls);
+    ADD_READ_STAT(remote_read_batched_bytes_requested);
+    ADD_READ_STAT(remote_read_batched_bytes_completed);
+    ADD_READ_STAT(paged_read_requests);
+    ADD_READ_STAT(paged_read_bytes_requested);
+    ADD_READ_STAT(paged_cache_hits);
+    ADD_READ_STAT(paged_cache_hit_bytes);
+    ADD_READ_STAT(paged_cache_misses);
+    ADD_READ_STAT(paged_cache_fills);
+    ADD_READ_STAT(paged_cache_fill_failures);
+    ADD_READ_STAT(paged_cross_page_bypasses);
+    ADD_READ_STAT(paged_cache_full_bypasses);
+    ADD_READ_STAT(paged_fill_fallbacks);
+    ADD_READ_STAT(paged_cache_clears);
+    ADD_READ_STAT(paged_cache_pages_cleared);
+
+#undef ADD_READ_STAT
 
 #define ADD_DERIVED_STAT(name, value) do { \
     PyObject *val = PyFloat_FromDouble(value); \

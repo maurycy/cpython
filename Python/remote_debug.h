@@ -157,6 +157,47 @@ typedef struct page_cache_entry {
 
 #define MAX_PAGES 1024
 
+typedef struct {
+    uint64_t remote_read_syscalls;
+    uint64_t remote_read_syscall_failures;
+    uint64_t remote_read_bytes_requested;
+    uint64_t remote_read_bytes_completed;
+    uint64_t remote_read_single_syscalls;
+    uint64_t remote_read_single_bytes_requested;
+    uint64_t remote_read_single_bytes_completed;
+    uint64_t remote_read_batched_syscalls;
+    uint64_t remote_read_batched_bytes_requested;
+    uint64_t remote_read_batched_bytes_completed;
+    uint64_t paged_read_requests;
+    uint64_t paged_read_bytes_requested;
+    uint64_t paged_cache_hits;
+    uint64_t paged_cache_hit_bytes;
+    uint64_t paged_cache_misses;
+    uint64_t paged_cache_fills;
+    uint64_t paged_cache_fill_failures;
+    uint64_t paged_cross_page_bypasses;
+    uint64_t paged_cache_full_bypasses;
+    uint64_t paged_fill_fallbacks;
+    uint64_t paged_cache_clears;
+    uint64_t paged_cache_pages_cleared;
+} _Py_RemoteDebug_ReadStats;
+
+#if defined(__GNUC__) || defined(__clang__)
+#  define _PY_REMOTE_DEBUG_UNLIKELY(value) __builtin_expect(!!(value), 0)
+#else
+#  define _PY_REMOTE_DEBUG_UNLIKELY(value) (value)
+#endif
+
+#define REMOTE_READ_STATS_ADD(handle, field, value) \
+    do { \
+        if (_PY_REMOTE_DEBUG_UNLIKELY((handle)->read_stats != NULL)) { \
+            (handle)->read_stats->field += (uint64_t)(value); \
+        } \
+    } while (0)
+
+#define REMOTE_READ_STATS_INC(handle, field) \
+    REMOTE_READ_STATS_ADD(handle, field, 1)
+
 // Define a platform-independent process handle structure
 typedef struct {
     pid_t pid;
@@ -170,6 +211,7 @@ typedef struct {
     page_cache_entry_t pages[MAX_PAGES];
     int page_cache_count;
     Py_ssize_t page_size;
+    _Py_RemoteDebug_ReadStats *read_stats;
 } proc_handle_t;
 
 // Forward declaration for use in validation function
@@ -215,6 +257,8 @@ _Py_RemoteDebug_FreePageCache(proc_handle_t *handle)
 UNUSED static void
 _Py_RemoteDebug_ClearCache(proc_handle_t *handle)
 {
+    REMOTE_READ_STATS_INC(handle, paged_cache_clears);
+    REMOTE_READ_STATS_ADD(handle, paged_cache_pages_cleared, handle->page_cache_count);
     for (int i = 0; i < handle->page_cache_count; i++) {
         handle->pages[i].valid = 0;
     }
@@ -238,6 +282,7 @@ _Py_RemoteDebug_InitProcHandle(proc_handle_t *handle, pid_t pid) {
 #endif
     handle->page_size = get_page_size();
     handle->page_cache_count = 0;
+    handle->read_stats = NULL;
     for (int i = 0; i < MAX_PAGES; i++) {
         handle->pages[i].data = NULL;
         handle->pages[i].valid = 0;
@@ -1161,9 +1206,14 @@ read_remote_memory_fallback(proc_handle_t *handle, uintptr_t remote_address, siz
         local[0].iov_len = len - result;
         off_t offset = remote_address + result;
 
+        REMOTE_READ_STATS_INC(handle, remote_read_syscalls);
+        REMOTE_READ_STATS_INC(handle, remote_read_single_syscalls);
+        REMOTE_READ_STATS_ADD(handle, remote_read_bytes_requested, local[0].iov_len);
+        REMOTE_READ_STATS_ADD(handle, remote_read_single_bytes_requested, local[0].iov_len);
         read_bytes = preadv(handle->memfd, local, 1, offset);
         if (read_bytes < 0) {
             int err = errno;
+            REMOTE_READ_STATS_INC(handle, remote_read_syscall_failures);
             errno = err;
             PyErr_SetFromErrno(PyExc_OSError);
             _set_debug_exception_cause(PyExc_OSError,
@@ -1180,6 +1230,8 @@ read_remote_memory_fallback(proc_handle_t *handle, uintptr_t remote_address, siz
                 handle->pid, remote_address + result, len - result, result);
             return -1;
         }
+        REMOTE_READ_STATS_ADD(handle, remote_read_bytes_completed, read_bytes);
+        REMOTE_READ_STATS_ADD(handle, remote_read_single_bytes_completed, read_bytes);
         result += read_bytes;
     } while ((size_t)read_bytes != local[0].iov_len);
     return 0;
@@ -1198,8 +1250,14 @@ _Py_RemoteDebug_ReadRemoteMemory(proc_handle_t *handle, uintptr_t remote_address
     SIZE_T read_bytes = 0;
     SIZE_T result = 0;
     do {
+        size_t request_len = len - result;
+        REMOTE_READ_STATS_INC(handle, remote_read_syscalls);
+        REMOTE_READ_STATS_INC(handle, remote_read_single_syscalls);
+        REMOTE_READ_STATS_ADD(handle, remote_read_bytes_requested, request_len);
+        REMOTE_READ_STATS_ADD(handle, remote_read_single_bytes_requested, request_len);
         if (!ReadProcessMemory(handle->hProcess, (LPCVOID)(remote_address + result), (char*)dst + result, len - result, &read_bytes)) {
             DWORD error = GetLastError();
+            REMOTE_READ_STATS_INC(handle, remote_read_syscall_failures);
             // Check if the process is still alive: we need to be able to tell our caller
             // that the process is dead and not just that the read failed.
             if (!is_process_alive(handle->hProcess)) {
@@ -1221,6 +1279,8 @@ _Py_RemoteDebug_ReadRemoteMemory(proc_handle_t *handle, uintptr_t remote_address
                 handle->pid, remote_address + result, len - result, result);
             return -1;
         }
+        REMOTE_READ_STATS_ADD(handle, remote_read_bytes_completed, read_bytes);
+        REMOTE_READ_STATS_ADD(handle, remote_read_single_bytes_completed, read_bytes);
         result += read_bytes;
     } while (result < len);
     return 0;
@@ -1239,9 +1299,14 @@ _Py_RemoteDebug_ReadRemoteMemory(proc_handle_t *handle, uintptr_t remote_address
         remote[0].iov_base = (void*)(remote_address + result);
         remote[0].iov_len = len - result;
 
+        REMOTE_READ_STATS_INC(handle, remote_read_syscalls);
+        REMOTE_READ_STATS_INC(handle, remote_read_single_syscalls);
+        REMOTE_READ_STATS_ADD(handle, remote_read_bytes_requested, remote[0].iov_len);
+        REMOTE_READ_STATS_ADD(handle, remote_read_single_bytes_requested, remote[0].iov_len);
         read_bytes = process_vm_readv(handle->pid, local, 1, remote, 1, 0);
         if (read_bytes < 0) {
             int err = errno;
+            REMOTE_READ_STATS_INC(handle, remote_read_syscall_failures);
             if (err == ENOSYS) {
                 return read_remote_memory_fallback(handle, remote_address, len, dst);
             }
@@ -1264,6 +1329,8 @@ _Py_RemoteDebug_ReadRemoteMemory(proc_handle_t *handle, uintptr_t remote_address
                 handle->pid, remote_address + result, len - result, result);
             return -1;
         }
+        REMOTE_READ_STATS_ADD(handle, remote_read_bytes_completed, read_bytes);
+        REMOTE_READ_STATS_ADD(handle, remote_read_single_bytes_completed, read_bytes);
         result += read_bytes;
     } while ((size_t)read_bytes != local[0].iov_len);
     return 0;
@@ -1276,7 +1343,12 @@ _Py_RemoteDebug_ReadRemoteMemory(proc_handle_t *handle, uintptr_t remote_address
         (mach_vm_address_t)dst,
         &bytes_read);
 
+    REMOTE_READ_STATS_INC(handle, remote_read_syscalls);
+    REMOTE_READ_STATS_INC(handle, remote_read_single_syscalls);
+    REMOTE_READ_STATS_ADD(handle, remote_read_bytes_requested, len);
+    REMOTE_READ_STATS_ADD(handle, remote_read_single_bytes_requested, len);
     if (kr != KERN_SUCCESS) {
+        REMOTE_READ_STATS_INC(handle, remote_read_syscall_failures);
         switch (err_get_code(kr)) {
         case KERN_PROTECTION_FAILURE:
             PyErr_Format(PyExc_PermissionError,
@@ -1318,6 +1390,8 @@ _Py_RemoteDebug_ReadRemoteMemory(proc_handle_t *handle, uintptr_t remote_address
         }
         return -1;
     }
+    REMOTE_READ_STATS_ADD(handle, remote_read_bytes_completed, bytes_read);
+    REMOTE_READ_STATS_ADD(handle, remote_read_single_bytes_completed, bytes_read);
     if (bytes_read != (mach_vm_size_t)len) {
         PyErr_Format(PyExc_OSError,
             "mach_vm_read_overwrite read %llu of %zu bytes for PID %d at "
@@ -1477,11 +1551,14 @@ _Py_RemoteDebug_PagedReadRemoteMemory(proc_handle_t *handle,
                                       size_t size,
                                       void *out)
 {
+    REMOTE_READ_STATS_INC(handle, paged_read_requests);
+    REMOTE_READ_STATS_ADD(handle, paged_read_bytes_requested, size);
     size_t page_size = handle->page_size;
     uintptr_t page_base = addr & ~(page_size - 1);
     size_t offset_in_page = addr - page_base;
 
     if (offset_in_page + size > page_size) {
+        REMOTE_READ_STATS_INC(handle, paged_cross_page_bypasses);
         return _Py_RemoteDebug_ReadRemoteMemory(handle, addr, size, out);
     }
 
@@ -1491,10 +1568,13 @@ _Py_RemoteDebug_PagedReadRemoteMemory(proc_handle_t *handle,
         page_cache_entry_t *entry = &handle->pages[i];
         if (entry->valid && entry->page_addr == page_base) {
             memcpy(out, entry->data + offset_in_page, size);
+            REMOTE_READ_STATS_INC(handle, paged_cache_hits);
+            REMOTE_READ_STATS_ADD(handle, paged_cache_hit_bytes, size);
             return 0;
         }
     }
 
+    REMOTE_READ_STATS_INC(handle, paged_cache_misses);
     if (handle->page_cache_count < MAX_PAGES) {
         page_cache_entry_t *entry = &handle->pages[handle->page_cache_count];
         if (entry->data == NULL) {
@@ -1512,15 +1592,20 @@ _Py_RemoteDebug_PagedReadRemoteMemory(proc_handle_t *handle,
         if (_Py_RemoteDebug_ReadRemoteMemory(handle, page_base, page_size, entry->data) < 0) {
             // Try to just copy the exact amount as a fallback
             PyErr_Clear();
+            REMOTE_READ_STATS_INC(handle, paged_cache_fill_failures);
+            REMOTE_READ_STATS_INC(handle, paged_fill_fallbacks);
             goto fallback;
         }
 
         entry->page_addr = page_base;
         entry->valid = 1;
         handle->page_cache_count++;
+        REMOTE_READ_STATS_INC(handle, paged_cache_fills);
         memcpy(out, entry->data + offset_in_page, size);
         return 0;
     }
+
+    REMOTE_READ_STATS_INC(handle, paged_cache_full_bypasses);
 
 fallback:
     // Cache full — fallback to uncached read
@@ -1556,11 +1641,18 @@ _Py_RemoteDebug_BatchedReadRemoteMemory(
             local[i].iov_len = segments[i].size;
             remote[i].iov_base = (void *)segments[i].remote_addr;
             remote[i].iov_len = segments[i].size;
+            REMOTE_READ_STATS_ADD(handle, remote_read_bytes_requested, segments[i].size);
+            REMOTE_READ_STATS_ADD(handle, remote_read_batched_bytes_requested, segments[i].size);
         }
+        REMOTE_READ_STATS_INC(handle, remote_read_syscalls);
+        REMOTE_READ_STATS_INC(handle, remote_read_batched_syscalls);
         ssize_t nread = process_vm_readv(handle->pid, local, nsegs, remote, nsegs, 0);
         if (nread >= 0) {
+            REMOTE_READ_STATS_ADD(handle, remote_read_bytes_completed, nread);
+            REMOTE_READ_STATS_ADD(handle, remote_read_batched_bytes_completed, nread);
             return (Py_ssize_t)nread;
         }
+        REMOTE_READ_STATS_INC(handle, remote_read_syscall_failures);
     }
 #else
     (void)handle;

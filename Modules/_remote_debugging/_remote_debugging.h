@@ -303,12 +303,19 @@ typedef struct {
     uint64_t batched_read_segments_completed; // Segments completed by batched reads
     uint64_t alias_hits;                     // macOS alias-cache hits
     uint64_t alias_misses;                   // macOS alias-cache misses
+    uint64_t alias_read_requests;            // macOS alias read attempts
+    uint64_t alias_read_bytes_requested;     // Logical bytes requested through alias reads
+    uint64_t alias_hit_bytes;                // Logical bytes served from alias cache
+    uint64_t alias_miss_bytes;               // Logical bytes served after alias miss/remap
+    uint64_t alias_bypass_reads;             // Alias reads bypassed to direct reads
+    uint64_t alias_bypass_bytes;             // Logical bytes bypassed to direct reads
     uint64_t alias_remap_failures;           // macOS remap/protect failures
     uint64_t alias_validation_fails;         // macOS alias snapshot validation failures
     uint64_t alias_evictions;                // macOS alias-cache LRU evictions
     uint64_t alias_identity_mismatches;      // macOS target identity mismatches
     uint64_t alias_disabled_at_init;         // macOS aliasing disabled during init (0/1)
     uint64_t alias_disabled_at_runtime;      // macOS aliasing disabled at runtime (0/1)
+    _Py_RemoteDebug_ReadStats read_stats;    // Low-level remote read statistics
 } UnwinderStats;
 
 #if defined(__GNUC__) || defined(__clang__)

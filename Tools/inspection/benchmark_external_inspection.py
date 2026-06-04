@@ -373,6 +373,93 @@ def print_benchmark_results(results):
         f"  {colors.CYAN}Work efficiency:{colors.RESET}     {efficiency_color}{efficiency:.1f}%{colors.RESET}"
     )
 
+    stats = results.get("unwinder_stats")
+    if stats:
+        print_stats_results(stats, results["sample_count"])
+
+
+def _format_ratio(numerator, denominator, suffix="", precision=2):
+    if denominator == 0:
+        return "N/A"
+    return f"{numerator / denominator:.{precision}f}{suffix}"
+
+
+def _format_percent(numerator, denominator):
+    if denominator == 0:
+        return "N/A"
+    return f"{(100.0 * numerator / denominator):.2f}%"
+
+
+def print_stats_results(stats, sample_count):
+    colors = get_colors(can_colorize())
+    print(f"\n{colors.BOLD_CYAN}Remote Read Statistics:{colors.RESET}")
+
+    remote_syscalls = stats.get("remote_read_syscalls", 0)
+    remote_completed = stats.get("remote_read_bytes_completed", 0)
+    single_syscalls = stats.get("remote_read_single_syscalls", 0)
+    batched_syscalls = stats.get("remote_read_batched_syscalls", 0)
+    batched_attempts = stats.get("batched_read_attempts", 0)
+    batched_successes = stats.get("batched_read_successes", 0)
+    paged_requests = stats.get("paged_read_requests", 0)
+    paged_hits = stats.get("paged_cache_hits", 0)
+    paged_misses = stats.get("paged_cache_misses", 0)
+    paged_requested = stats.get("paged_read_bytes_requested", 0)
+    paged_hit_bytes = stats.get("paged_cache_hit_bytes", 0)
+    alias_requests = stats.get("alias_read_requests", 0)
+    alias_hits = stats.get("alias_hits", 0)
+    alias_misses = stats.get("alias_misses", 0)
+    alias_hit_bytes = stats.get("alias_hit_bytes", 0)
+    alias_requested = stats.get("alias_read_bytes_requested", 0)
+
+    print(
+        f"  {colors.CYAN}Remote syscalls/sample:{colors.RESET}        "
+        f"{colors.YELLOW}{_format_ratio(remote_syscalls, sample_count)}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Remote bytes completed/sample:{colors.RESET} "
+        f"{colors.YELLOW}{_format_ratio(remote_completed, sample_count)}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Average bytes/syscall:{colors.RESET}         "
+        f"{colors.YELLOW}{_format_ratio(remote_completed, remote_syscalls)}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Single syscalls:{colors.RESET}                "
+        f"{colors.MAGENTA}{single_syscalls:,}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Batched syscalls:{colors.RESET}               "
+        f"{colors.MAGENTA}{batched_syscalls:,}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Batched success rate:{colors.RESET}           "
+        f"{colors.YELLOW}{_format_percent(batched_successes, batched_attempts)}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Paged eligible hit-rate:{colors.RESET}        "
+        f"{colors.YELLOW}{_format_percent(paged_hits, paged_hits + paged_misses)}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Paged effective hit-rate:{colors.RESET}       "
+        f"{colors.YELLOW}{_format_percent(paged_hits, paged_requests)}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Paged byte hit-rate:{colors.RESET}            "
+        f"{colors.YELLOW}{_format_percent(paged_hit_bytes, paged_requested)}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Alias hit-rate:{colors.RESET}                 "
+        f"{colors.YELLOW}{_format_percent(alias_hits, alias_hits + alias_misses)}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Alias byte hit-rate:{colors.RESET}            "
+        f"{colors.YELLOW}{_format_percent(alias_hit_bytes, alias_requested)}{colors.RESET}"
+    )
+    print(
+        f"  {colors.CYAN}Alias requests:{colors.RESET}                 "
+        f"{colors.MAGENTA}{alias_requests:,}{colors.RESET}"
+    )
+
 
 def parse_arguments():
     """Parse command line arguments"""
@@ -434,6 +521,12 @@ Available code examples:
         "--blocking",
         action="store_true",
         help="Stop all threads before sampling for consistent snapshots",
+    )
+
+    parser.add_argument(
+        "--stats",
+        action="store_true",
+        help="Collect and print remote-read/cache statistics",
     )
 
     args = parser.parse_args()
@@ -526,7 +619,7 @@ def main():
                     elif args.threads == "only_active":
                         kwargs["only_active_thread"] = True
                     unwinder = _remote_debugging.RemoteUnwinder(
-                        process.pid, cache_frames=True, **kwargs
+                        process.pid, cache_frames=True, stats=args.stats, **kwargs
                     )
                     results = benchmark(
                         unwinder,
@@ -534,6 +627,8 @@ def main():
                         blocking=args.blocking,
                         operation=args.operation,
                     )
+                    if args.stats:
+                        results["unwinder_stats"] = unwinder.get_stats()
                 finally:
                     cleanup_process(process, temp_file_path)
 

@@ -234,7 +234,11 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
     if (len == 0) {
         return 0;
     }
+    STATS_INC(unwinder, alias_read_requests);
+    STATS_ADD(unwinder, alias_read_bytes_requested, len);
     if (cache->disabled) {
+        STATS_INC(unwinder, alias_bypass_reads);
+        STATS_ADD(unwinder, alias_bypass_bytes, len);
         return _Py_RemoteDebug_ReadRemoteMemory(
             &unwinder->handle, remote_addr, len, dst);
     }
@@ -243,6 +247,8 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
     uintptr_t page_base = remote_addr & ~(uintptr_t)(page_size - 1);
     size_t offset = (size_t)(remote_addr - page_base);
     if (offset >= page_size || len > page_size - offset) {
+        STATS_INC(unwinder, alias_bypass_reads);
+        STATS_ADD(unwinder, alias_bypass_bytes, len);
         return _Py_RemoteDebug_ReadRemoteMemory(
             &unwinder->handle, remote_addr, len, dst);
     }
@@ -250,21 +256,27 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
     AliasPageEntry *entry = alias_find_entry(unwinder, page_base);
     if (entry != NULL) {
         if (!alias_maybe_probe_identity(unwinder)) {
+            STATS_INC(unwinder, alias_bypass_reads);
+            STATS_ADD(unwinder, alias_bypass_bytes, len);
             return _Py_RemoteDebug_ReadRemoteMemory(
                 &unwinder->handle, remote_addr, len, dst);
         }
         entry->access_seq = ++cache->access_seq;
         memcpy(dst, (const char *)entry->local_page_base + offset, len);
         STATS_INC(unwinder, alias_hits);
+        STATS_ADD(unwinder, alias_hit_bytes, len);
         return 0;
     }
 
     STATS_INC(unwinder, alias_misses);
     if (alias_remap_page(unwinder, page_base, &entry) < 0) {
+        STATS_INC(unwinder, alias_bypass_reads);
+        STATS_ADD(unwinder, alias_bypass_bytes, len);
         return _Py_RemoteDebug_ReadRemoteMemory(
             &unwinder->handle, remote_addr, len, dst);
     }
     memcpy(dst, (const char *)entry->local_page_base + offset, len);
+    STATS_ADD(unwinder, alias_miss_bytes, len);
     return 0;
 }
 
