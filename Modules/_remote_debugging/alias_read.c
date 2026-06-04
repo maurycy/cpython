@@ -203,26 +203,6 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
 }
 
 int
-_Py_RemoteDebug_AliasProbe(RemoteUnwinderObject *unwinder,
-                           uintptr_t probe_addr)
-{
-    AliasReadCache *cache = &unwinder->alias_cache;
-    if (cache->disabled) {
-        return -1;
-    }
-    size_t page_size = (size_t)unwinder->handle.page_size;
-    uintptr_t page_base = probe_addr & ~(uintptr_t)(page_size - 1);
-    mach_vm_address_t local_addr = 0;
-    if (alias_map_readonly_page(unwinder, page_base, &local_addr) < 0) {
-        STATS_INC(unwinder, alias_remap_failures);
-        return -1;
-    }
-    (void)mach_vm_deallocate(mach_task_self(), local_addr,
-                             (mach_vm_size_t)page_size);
-    return 0;
-}
-
-int
 _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
                             uintptr_t remote_addr,
                             size_t len,
