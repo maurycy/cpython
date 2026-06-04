@@ -34,22 +34,14 @@ alias_deallocate_entry(AliasPageEntry *entry)
     memset(entry, 0, sizeof(*entry));
 }
 
-static size_t
-alias_set_index(RemoteUnwinderObject *unwinder, uintptr_t page_base)
-{
-    size_t page_size = (size_t)unwinder->handle.page_size;
-    uintptr_t page_index = page_base >> __builtin_ctzll(page_size);
-    return (size_t)(page_index & (ALIAS_CACHE_SETS - 1));
-}
-
 static AliasPageEntry *
 alias_find_entry(RemoteUnwinderObject *unwinder, uintptr_t page_base)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
-    AliasPageEntry *ways = cache->pages[alias_set_index(unwinder, page_base)];
-    for (int w = 0; w < ALIAS_CACHE_WAYS; w++) {
-        if (ways[w].valid && ways[w].remote_page_base == page_base) {
-            return &ways[w];
+    for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
+        AliasPageEntry *entry = &cache->pages[i];
+        if (entry->valid && entry->remote_page_base == page_base) {
+            return entry;
         }
     }
     return NULL;
@@ -59,10 +51,8 @@ void
 _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
-    for (size_t s = 0; s < ALIAS_CACHE_SETS; s++) {
-        for (int w = 0; w < ALIAS_CACHE_WAYS; w++) {
-            alias_deallocate_entry(&cache->pages[s][w]);
-        }
+    for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
+        alias_deallocate_entry(&cache->pages[i]);
     }
 }
 
@@ -80,8 +70,8 @@ _Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwinder,
 {
     size_t page_size = (size_t)unwinder->handle.page_size;
     uintptr_t page_base = remote_addr & ~(uintptr_t)(page_size - 1);
-    AliasPageEntry *entry = alias_find_entry(unwinder, page_base);
-    if (entry != NULL) {
+    AliasPageEntry *entry;
+    while ((entry = alias_find_entry(unwinder, page_base)) != NULL) {
         alias_deallocate_entry(entry);
     }
 }
@@ -128,23 +118,25 @@ alias_maybe_probe_identity(RemoteUnwinderObject *unwinder)
 }
 
 static AliasPageEntry *
-alias_alloc_entry(RemoteUnwinderObject *unwinder, uintptr_t page_base)
+alias_alloc_entry(RemoteUnwinderObject *unwinder)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
-    size_t set = alias_set_index(unwinder, page_base);
-    AliasPageEntry *ways = cache->pages[set];
+    AliasPageEntry *oldest = NULL;
 
-    for (int w = 0; w < ALIAS_CACHE_WAYS; w++) {
-        if (!ways[w].valid) {
-            return &ways[w];
+    for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
+        AliasPageEntry *entry = &cache->pages[i];
+        if (!entry->valid) {
+            return entry;
+        }
+        if (oldest == NULL || entry->access_seq < oldest->access_seq) {
+            oldest = entry;
         }
     }
 
-    uint8_t victim = cache->victim[set];
-    cache->victim[set] = (uint8_t)((victim + 1) % ALIAS_CACHE_WAYS);
-    alias_deallocate_entry(&ways[victim]);
+    assert(oldest != NULL);
+    alias_deallocate_entry(oldest);
     STATS_INC(unwinder, alias_evictions);
-    return &ways[victim];
+    return oldest;
 }
 
 static int
@@ -191,6 +183,7 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
                  uintptr_t page_base,
                  AliasPageEntry **entry_out)
 {
+    AliasReadCache *cache = &unwinder->alias_cache;
     mach_vm_address_t local_addr = 0;
     if (alias_map_readonly_page(unwinder, page_base, &local_addr) < 0) {
         STATS_INC(unwinder, alias_remap_failures);
@@ -198,10 +191,11 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
         return -1;
     }
 
-    AliasPageEntry *entry = alias_alloc_entry(unwinder, page_base);
+    AliasPageEntry *entry = alias_alloc_entry(unwinder);
     entry->remote_page_base = page_base;
     entry->local_page_base = local_addr;
     entry->size = (mach_vm_size_t)unwinder->handle.page_size;
+    entry->access_seq = ++cache->access_seq;
     entry->valid = 1;
 
     *entry_out = entry;
@@ -237,6 +231,7 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
             return _Py_RemoteDebug_ReadRemoteMemory(
                 &unwinder->handle, remote_addr, len, dst);
         }
+        entry->access_seq = ++cache->access_seq;
         memcpy(dst, (const char *)entry->local_page_base + offset, len);
         STATS_INC(unwinder, alias_hits);
         return 0;

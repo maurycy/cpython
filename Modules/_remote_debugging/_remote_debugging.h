@@ -263,20 +263,20 @@ typedef struct {
 } RemoteReadPrefetch;
 
 #if defined(__APPLE__) && TARGET_OS_OSX
-#define ALIAS_CACHE_SETS 64
-#define ALIAS_CACHE_WAYS 2
+#define MAX_ALIAS_PAGES 256
 #define ALIAS_PROBE_MASK 0x3ff
 
 typedef struct {
     uintptr_t remote_page_base;
     mach_vm_address_t local_page_base;
     mach_vm_size_t size;
+    uint64_t access_seq;
     int valid;
 } AliasPageEntry;
 
 typedef struct {
-    AliasPageEntry pages[ALIAS_CACHE_SETS][ALIAS_CACHE_WAYS];
-    uint8_t victim[ALIAS_CACHE_SETS];
+    AliasPageEntry pages[MAX_ALIAS_PAGES];
+    uint64_t access_seq;
     uint64_t target_start_tvsec;
     uint32_t probe_counter;
     int disabled;
