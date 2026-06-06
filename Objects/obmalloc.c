@@ -1213,14 +1213,18 @@ void
 _PyMem_DarwinReusableEnable(int enabled)
 {
 #if defined(__APPLE__) && defined(WITH_OBMALLOC_REUSABLE)
+    int ok = 0;
     if (enabled) {
         long ps = sysconf(_SC_PAGESIZE);
         /* ARENA_SIZE must be a whole number of OS pages for whole-arena madvise. */
         if (ps > 0 && (ARENA_SIZE % (size_t)ps) == 0) {
             _Py_obmalloc_reusable_pagesize = (size_t)ps;
-            _Py_obmalloc_reusable_enabled = 1;
+            ok = 1;
         }
     }
+    /* Always assign so a later init cycle (env var absent, -E/-I) turns the
+       feature back off rather than inheriting a previous "on". */
+    _Py_obmalloc_reusable_enabled = ok;
 #else
     (void)enabled;
 #endif
@@ -2148,17 +2152,18 @@ arena_map_is_used(OMState *state, pymem_block *p)
 
 
 #ifdef OBMALLOC_REUSABLE_ACTIVE
-/* Reclaim the macOS reusable-arena cache.
+/* Reclaim the macOS reusable-arena cache (called under the GIL from the
+ * memory-pressure pending call).
  *
- * level 0 (soft / GC trim): advise each still-warm cached arena
+ * critical == 0 (warning pressure): advise each still-warm cached arena
  *   MADV_FREE_REUSABLE so it drops out of phys_footprint, setting
- *   darwin_reusable on success (new_arena() will MADV_FREE_REUSE it on reuse).
+ *   darwin_reusable on success (new_arena() MADV_FREE_REUSE's it on reuse).
  *   The arenas stay cached and mapped.
- * level 1 (critical / memory pressure): munmap the whole cache, truly freeing
- *   it.  Per entry: free, address=0, return the slot to unused_arena_objects,
- *   and decrement both num_reusable_arenas and narenas_currently_allocated
- *   (cached arenas were counted as allocated).  No MADV_FREE_REUSE needed first
- *   - munmap of reusable pages is harmless. */
+ * critical != 0 (critical pressure): munmap the whole cache, truly freeing it.
+ *   Per entry: free, address=0, return the slot to unused_arena_objects, and
+ *   decrement both num_reusable_arenas and narenas_currently_allocated (cached
+ *   arenas were counted as allocated).  No MADV_FREE_REUSE needed first - munmap
+ *   of reusable pages is harmless. */
 static void
 obmalloc_reclaim_arenas(OMState *state, int critical)
 {
@@ -2193,21 +2198,33 @@ obmalloc_reclaim_arenas(OMState *state, int critical)
 }
 #endif
 
+/* Release reclaimable memory held by allocator caches for tstate's interpreter.
+ * Called under the GIL (e.g. from the macOS memory-pressure pending call).
+ * Wires the two reclaimers that exist today: the obmalloc warm-arena cache and
+ * mimalloc's collect.  (A general reclaim registry can replace this direct wiring
+ * if/when more subsystems - datastack, embedder hooks - need to participate.) */
 void
-_PyObject_ObmallocTrimReusable(PyInterpreterState *interp)
+_PyMem_ReclaimUnusedMemory(PyThreadState *tstate, int level)
 {
 #ifdef OBMALLOC_REUSABLE_ACTIVE
-    if (!_PyDarwinVM_ReusableEnabled()) {
-        return;
+    if (tstate != NULL && _PyDarwinVM_ReusableEnabled()) {
+        OMState *state = tstate->interp->obmalloc;
+        if (state != NULL) {
+            /* level < 2: advise cached arenas reusable (stay cached);
+             * level >= 2 (critical): munmap the cache. */
+            obmalloc_reclaim_arenas(state, level >= 2);
+        }
     }
-    OMState *state = interp->obmalloc;
-    if (state == NULL) {
-        return;
-    }
-    obmalloc_reclaim_arenas(state, 0);
-#else
-    (void)interp;
 #endif
+#ifdef WITH_MIMALLOC
+    if (_PyMem_MimallocEnabled()) {
+        /* Dormant in a default GIL build (pymalloc is the allocator); active
+         * under PYTHONMALLOC=mimalloc and in free-threaded builds. */
+        mi_collect(level >= 1);
+    }
+#endif
+    (void)tstate;
+    (void)level;
 }
 
 /* Allocate a new arena.  If we run out of memory, return NULL.  Else
@@ -2238,20 +2255,44 @@ new_arena(OMState *state)
      * (see insert_to_freepool), so no re-carve is needed and we never read its
      * old contents.  Reclaim its pages with MADV_FREE_REUSE and re-mark it owned
      * in the radix tree first. */
-    if (_PyDarwinVM_ReusableEnabled() && reusable_arenas != NULL) {
+    /* Drain the cache whenever it is non-empty, independent of the runtime
+     * flag: entries only get here while the feature was on, and reusing them is
+     * always safe and cheaper than mmap.  This also avoids stranding a cache if
+     * the flag were ever turned off for a later init. */
+    if (reusable_arenas != NULL) {
         arenaobj = reusable_arenas;
         if (arena_map_mark_used(state, arenaobj->address, 1)) {
             reusable_arenas = arenaobj->nextarena;
             num_reusable_arenas--;
             /* Warm cache entries cost no syscall; only reclaim pages that were
-             * actually advised reusable (by the GC trim / memory pressure). */
+             * actually advised reusable (by memory pressure). */
+            int reuse_ok = 1;
             if (arenaobj->darwin_reusable) {
-                (void)_PyDarwinVM_MarkReused((void *)arenaobj->address, ARENA_SIZE);
-                arenaobj->darwin_reusable = 0;
+                if (_PyDarwinVM_MarkReused((void *)arenaobj->address,
+                                           ARENA_SIZE) == 0) {
+                    arenaobj->darwin_reusable = 0;
+                }
+                else {
+                    reuse_ok = 0;  /* must not touch still-reusable pages */
+                }
             }
-            /* Cache reuse is not a new allocation: narenas_currently_allocated
-             * and ntimes_arena_allocated stay unchanged. */
-            return arenaobj;
+            if (reuse_ok) {
+                /* Cache reuse is not a new allocation: narenas_currently_allocated
+                 * and ntimes_arena_allocated stay unchanged. */
+                return arenaobj;
+            }
+            /* MADV_FREE_REUSE failed: drop this arena entirely (unmap + recycle
+             * the slot) and fall through to a fresh allocation, rather than use
+             * pages the kernel still considers reusable. */
+            arena_map_mark_used(state, arenaobj->address, 0);
+            _PyObject_Arena.free(_PyObject_Arena.ctx,
+                                 (void *)arenaobj->address, ARENA_SIZE);
+            arenaobj->address = 0;
+            arenaobj->darwin_reusable = 0;
+            arenaobj->nextarena = unused_arena_objects;
+            unused_arena_objects = arenaobj;
+            --narenas_currently_allocated;
+            /* fall through */
         }
         /* radix re-mark failed (OOM): leave it cached, fall through. */
     }

@@ -491,6 +491,7 @@ PYTHON_OBJS=	\
 		Python/pyfpe.o \
 		Python/pyhash.o \
 		Python/pylifecycle.o \
+		Python/memory_pressure_darwin.o \
 		Python/pymath.o \
 		Python/pystate.o \
 		Python/pystats.o \

@@ -1575,6 +1575,11 @@ init_interp_main(PyThreadState *tstate)
 
     if (is_main_interp) {
         _PyRuntimeState_SetInitialized(interp->runtime, 1);
+#if defined(__APPLE__)
+        /* Start the macOS memory-pressure source (no-op when the reusable
+         * feature is disabled). */
+        _PyMem_DarwinPressureStart();
+#endif
     }
 
     return _PyStatus_OK();
@@ -2397,6 +2402,13 @@ _Py_Finalize(_PyRuntimeState *runtime)
 
     // Block some operations.
     tstate->interp->finalizing = 1;
+
+#if defined(__APPLE__)
+    /* Stop the macOS memory-pressure source early, while the runtime is still
+     * initialized and the main thread still runs, so no late event schedules a
+     * pending call into torn-down state. */
+    _PyMem_DarwinPressureStop();
+#endif
 
     // This call stops the world and takes the pending calls lock.
     make_pre_finalization_calls(tstate, /*subinterpreters=*/1);

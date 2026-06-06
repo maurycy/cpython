@@ -105,11 +105,19 @@ extern int _PyMem_SetupAllocators(PyMemAllocatorName allocator);
    during pre-configuration. */
 extern void _PyMem_DarwinReusableEnable(int enabled);
 
-/* macOS only: advise the warm cached empty arenas MADV_FREE_REUSABLE so they
-   drop out of phys_footprint while idle (they stay cached for fast reuse).
-   No-op unless the feature is enabled.  Call with the GIL held (e.g. from the
-   cyclic GC at the end of a full collection). */
-extern void _PyObject_ObmallocTrimReusable(PyInterpreterState *interp);
+/* Ask registered allocator caches to release reclaimable memory.  Runs the
+   reclaim for the interpreter of `tstate`; must be called with the GIL held
+   (e.g. from a pending call scheduled by the macOS memory-pressure source).
+   level: 0 = opportunistic, 1 = pressure (advise reusable), 2 = critical
+   (drop/unmap caches). */
+extern void _PyMem_ReclaimUnusedMemory(PyThreadState *tstate, int level);
+
+/* macOS only: start/stop the process-global memory-pressure source that drives
+   _PyMem_ReclaimUnusedMemory at a GIL-safe point.  Start once for the main
+   interpreter after the runtime is up; stop early during finalization before
+   the runtime is torn down.  No-ops off macOS or when the feature is disabled. */
+extern void _PyMem_DarwinPressureStart(void);
+extern void _PyMem_DarwinPressureStop(void);
 
 // Default raw memory allocator that is not affected by PyMem_SetAllocator()
 extern void *_PyMem_DefaultRawMalloc(size_t);
