@@ -100,6 +100,16 @@ extern int _PyMem_GetAllocatorName(
    PYMEM_ALLOCATOR_NOT_SET does nothing. */
 extern int _PyMem_SetupAllocators(PyMemAllocatorName allocator);
 
+/* macOS only: opt in to returning idle pymalloc pool pages to the kernel with
+   XNU MADV_FREE_REUSABLE/MADV_FREE_REUSE.  No-op when not on macOS or not
+   supported.  Called once during pre-configuration. */
+extern void _PyMem_DarwinReusableEnable(int enabled);
+
+/* macOS only: advise currently-idle, fully-empty pymalloc pools as reusable
+   (MADV_FREE_REUSABLE) for the given interpreter.  No-op unless the feature is
+   enabled.  Must be called with the GIL held (e.g. from cyclic GC). */
+extern void _PyObject_ObmallocTrimReusable(PyInterpreterState *interp);
+
 // Default raw memory allocator that is not affected by PyMem_SetAllocator()
 extern void *_PyMem_DefaultRawMalloc(size_t);
 extern void *_PyMem_DefaultRawCalloc(size_t, size_t);

@@ -200,6 +200,16 @@ typedef unsigned int pymem_uint;  /* assuming >= 16 bits */
 #endif
 #endif
 
+/* macOS only: opt-in support for returning idle, fully-empty pool pages to the
+ * kernel with XNU's MADV_FREE_REUSABLE / MADV_FREE_REUSE (lower phys_footprint).
+ * Requires the radix tree (so the free path never reads a free pool's page to
+ * find its arena) and 64-bit (so POOL_SIZE is a whole number of OS pages). The
+ * actual madvise() use is further guarded by _PyDarwinVM_HAVE_REUSABLE in
+ * pycore_darwin_vm.h, and at runtime by _Py_obmalloc_reusable_enabled. */
+#if defined(__APPLE__) && WITH_PYMALLOC_RADIX_TREE && (SIZEOF_VOID_P >= 8)
+#  define WITH_OBMALLOC_REUSABLE 1
+#endif
+
 /*
  * The allocator sub-allocates <Big> blocks of memory (called arenas) aligned
  * on a page boundary. This is a reserved virtual address space for the
@@ -314,6 +324,22 @@ struct arena_object {
      */
     struct arena_object* nextarena;
     struct arena_object* prevarena;
+
+#ifdef WITH_OBMALLOC_REUSABLE
+    /* macOS reusable-pages bookkeeping, kept OUTSIDE the pool pages so a pool
+     * page can be marked MADV_FREE_REUSABLE without us ever having to read it
+     * again before MADV_FREE_REUSE.  Only used when _Py_obmalloc_reusable_enabled.
+     *
+     * free_pool_stack is a LIFO stack of free pool *indices* within this arena
+     * (index = (pool_addr - address) / POOL_SIZE); it replaces the in-page
+     * `freepools`/`nextpool` chain when the feature is active and preserves the
+     * most-recently-freed-first order.  reusable_bitmap marks which of those
+     * pools are currently advised reusable (and so need MADV_FREE_REUSE plus a
+     * full header reinit before reuse). */
+    uint nfree_in_stack;
+    uint8_t free_pool_stack[MAX_POOLS_IN_ARENA];
+    uint64_t reusable_bitmap[(MAX_POOLS_IN_ARENA + 63) / 64];
+#endif
 };
 
 #define POOL_OVERHEAD   _Py_SIZE_ROUND_UP(sizeof(struct pool_header), ALIGNMENT)
@@ -369,6 +395,11 @@ empty == all the pool's blocks are currently available for allocation
     an empty list in usedpools[], it takes the first pool off of freepools.
     If the size class needed happens to be the same as the size class the pool
     last had, some pool initialization can be skipped.
+    (Exception: when the macOS reusable-pages feature is active --
+    WITH_OBMALLOC_REUSABLE and _Py_obmalloc_reusable_enabled -- empty pools are
+    tracked by index in the arena_object's free_pool_stack instead of through
+    nextpool/freepools, so that a pool page can be marked MADV_FREE_REUSABLE
+    without ever being read again before MADV_FREE_REUSE.)
 
 
 Block Management

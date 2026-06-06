@@ -15,6 +15,20 @@
 #include <stdbool.h>
 #include <stdio.h>                // fopen(), fgets(), sscanf()
 #include <errno.h>                // errno
+#ifdef __APPLE__
+#  include <unistd.h>             // sysconf()
+#  include "pycore_darwin_vm.h"   // _PyDarwinVM_MarkReusable()
+// Runtime gate + cached page size for the macOS reusable-pages feature
+// (see pycore_darwin_vm.h and WITH_OBMALLOC_REUSABLE).  Off by default; armed
+// once during pre-configuration by _PyMem_DarwinReusableEnable().
+int _Py_obmalloc_reusable_enabled = 0;
+size_t _Py_obmalloc_reusable_pagesize = 0;
+// The feature needs both the platform/arch gate (WITH_OBMALLOC_REUSABLE) and
+// the madvise() flags (_PyDarwinVM_HAVE_REUSABLE) to be present.
+#  if defined(WITH_OBMALLOC_REUSABLE) && defined(_PyDarwinVM_HAVE_REUSABLE)
+#    define OBMALLOC_REUSABLE_ACTIVE 1
+#  endif
+#endif
 #ifdef WITH_MIMALLOC
 // Forward declarations of functions used in our mimalloc modifications
 static void _PyMem_mi_page_clear_qsbr(mi_page_t *page);
@@ -1195,6 +1209,24 @@ _PyObject_VirtualFree(void *obj, size_t size)
 }
 
 
+void
+_PyMem_DarwinReusableEnable(int enabled)
+{
+#if defined(__APPLE__) && defined(WITH_OBMALLOC_REUSABLE)
+    if (enabled) {
+        long ps = sysconf(_SC_PAGESIZE);
+        /* POOL_SIZE must be a whole number of OS pages for whole-pool madvise. */
+        if (ps > 0 && (POOL_SIZE % (size_t)ps) == 0) {
+            _Py_obmalloc_reusable_pagesize = (size_t)ps;
+            _Py_obmalloc_reusable_enabled = 1;
+        }
+    }
+#else
+    (void)enabled;
+#endif
+}
+
+
 /***********************/
 /* the "raw" allocator */
 /***********************/
@@ -1764,6 +1796,12 @@ typedef struct _obmalloc_state OMState;
 static struct _obmalloc_state obmalloc_state_main;
 static bool obmalloc_state_initialized;
 
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+/* Forward declaration: used by _PyInterpreterState_GetAllocatedBlocks below,
+ * defined with the other reusable-pages helpers further down. */
+static inline int obmalloc_pool_is_reusable(struct arena_object *ao, poolp pool);
+#endif
+
 static inline int
 has_own_state(PyInterpreterState *interp)
 {
@@ -1865,6 +1903,14 @@ _PyInterpreterState_GetAllocatedBlocks(PyInterpreterState *interp)
         assert(base <= (uintptr_t) allarenas[i].pool_address);
         for (; base < (uintptr_t) allarenas[i].pool_address; base += POOL_SIZE) {
             poolp p = (poolp)base;
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+            if (_PyDarwinVM_ReusableEnabled()
+                && obmalloc_pool_is_reusable(&allarenas[i], p)) {
+                /* Reusable pools are fully empty (0 allocated blocks); do not
+                 * read the page or it would fault back in. */
+                continue;
+            }
+#endif
             n += p->ref.count;
         }
     }
@@ -2205,6 +2251,13 @@ new_arena(OMState *state)
     if (narenas_currently_allocated > narenas_highwater)
         narenas_highwater = narenas_currently_allocated;
     arenaobj->freepools = NULL;
+#ifdef WITH_OBMALLOC_REUSABLE
+    /* Reset reusable-pages bookkeeping for this (possibly recycled) arena.
+       The previous mapping (if any) was munmap'd, so no MADV_FREE_REUSE is
+       needed; just drop any stale stack/bitmap state. */
+    arenaobj->nfree_in_stack = 0;
+    memset(arenaobj->reusable_bitmap, 0, sizeof(arenaobj->reusable_bitmap));
+#endif
     /* pool_address <- first pool-aligned address in the arena
        nfreepools <- number of whole pools that fit after alignment */
     arenaobj->pool_address = (pymem_block*)arenaobj->address;
@@ -2347,6 +2400,135 @@ pymalloc_pool_extend(poolp pool, uint size)
     pool->nextpool = next;
 }
 
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+/* macOS reusable-pages helpers.  These maintain free-pool tracking OUTSIDE the
+ * pool pages (in the arena_object) so a fully-empty pool page can be advised
+ * MADV_FREE_REUSABLE and never read again until MADV_FREE_REUSE.  Only used
+ * when _Py_obmalloc_reusable_enabled; pymalloc runs under the GIL so no locking
+ * is needed.  See pycore_darwin_vm.h and WITH_OBMALLOC_REUSABLE.
+ */
+
+/* Index of a pool within its arena, relative to the first pool-aligned address
+ * (mmap may hand back a base that is page- but not POOL_SIZE-aligned). */
+static inline uint
+obmalloc_pool_index(struct arena_object *ao, poolp pool)
+{
+    uintptr_t base = (uintptr_t)_Py_ALIGN_UP(ao->address, POOL_SIZE);
+    return (uint)(((uintptr_t)pool - base) / POOL_SIZE);
+}
+
+static inline poolp
+obmalloc_pool_at(struct arena_object *ao, uint idx)
+{
+    uintptr_t base = (uintptr_t)_Py_ALIGN_UP(ao->address, POOL_SIZE);
+    return (poolp)(base + (uintptr_t)idx * POOL_SIZE);
+}
+
+static inline int
+obmalloc_pool_is_reusable(struct arena_object *ao, poolp pool)
+{
+    uint idx = obmalloc_pool_index(ao, pool);
+    return (ao->reusable_bitmap[idx >> 6] & ((uint64_t)1 << (idx & 63))) != 0;
+}
+
+/* Push a just-emptied pool onto the arena's free-pool index stack (LIFO,
+ * matching the previous freepools order).  Freshly-freed pools are NOT marked
+ * reusable here; obmalloc_trim_reusable() advises idle ones later. */
+static inline void
+obmalloc_reusable_push(struct arena_object *ao, poolp pool)
+{
+    uint idx = obmalloc_pool_index(ao, pool);
+    assert(idx < MAX_POOLS_IN_ARENA);
+    ao->reusable_bitmap[idx >> 6] &= ~((uint64_t)1 << (idx & 63));
+    assert(ao->nfree_in_stack < MAX_POOLS_IN_ARENA);
+    ao->free_pool_stack[ao->nfree_in_stack++] = (uint8_t)idx;
+}
+
+/* Pop the most-recently-freed pool from the stack, or NULL if empty.  If the
+ * popped pool was advised reusable, reclaim it (MADV_FREE_REUSE), clear the bit,
+ * restore arenaindex, and set *force_reinit so the caller skips the szidx fast
+ * path (the page contents are undefined after REUSE). */
+static poolp
+obmalloc_reusable_pop(OMState *state, struct arena_object *ao, int *force_reinit)
+{
+    if (ao->nfree_in_stack == 0) {
+        return NULL;
+    }
+    uint idx = ao->free_pool_stack[--ao->nfree_in_stack];
+    poolp pool = obmalloc_pool_at(ao, idx);
+    uint64_t bit = (uint64_t)1 << (idx & 63);
+    if (ao->reusable_bitmap[idx >> 6] & bit) {
+        ao->reusable_bitmap[idx >> 6] &= ~bit;
+        (void)_PyDarwinVM_MarkReused(pool, POOL_SIZE);
+        pool->arenaindex = (uint)(ao - allarenas);
+        *force_reinit = 1;
+    }
+    return pool;
+}
+
+/* Advise all currently-idle, not-yet-reusable free pools in this interpreter as
+ * MADV_FREE_REUSABLE, coalescing contiguous pool indices into one madvise() per
+ * run.  A reusable bit is set only after a successful madvise() (XNU
+ * REUSABLE/REUSE accounting is pair-sensitive). */
+static void
+obmalloc_trim_reusable(OMState *state)
+{
+    for (uint i = 0; i < maxarenas; ++i) {
+        struct arena_object *ao = &allarenas[i];
+        if (ao->address == 0 || ao->nfree_in_stack == 0) {
+            continue;
+        }
+        /* advisable[idx] == pool idx is free and not yet reusable. */
+        bool advisable[MAX_POOLS_IN_ARENA];
+        memset(advisable, 0, sizeof(advisable));
+        for (uint s = 0; s < ao->nfree_in_stack; ++s) {
+            uint idx = ao->free_pool_stack[s];
+            if (!(ao->reusable_bitmap[idx >> 6] & ((uint64_t)1 << (idx & 63)))) {
+                advisable[idx] = true;
+            }
+        }
+        /* Advise maximal contiguous runs as reusable, one madvise() per run.
+         * Set each bit only on madvise() success (pair-sensitive accounting). */
+        uint idx = 0;
+        while (idx < MAX_POOLS_IN_ARENA) {
+            if (!advisable[idx]) {
+                idx++;
+                continue;
+            }
+            uint lo = idx;
+            while (idx < MAX_POOLS_IN_ARENA && advisable[idx]) {
+                idx++;
+            }
+            uint hi = idx - 1;          /* inclusive */
+            poolp start = obmalloc_pool_at(ao, lo);
+            size_t len = (size_t)(hi - lo + 1) * POOL_SIZE;
+            if (_PyDarwinVM_MarkReusable(start, len) == 0) {
+                for (uint k = lo; k <= hi; ++k) {
+                    ao->reusable_bitmap[k >> 6] |= ((uint64_t)1 << (k & 63));
+                }
+            }
+        }
+    }
+}
+#endif  /* OBMALLOC_REUSABLE_ACTIVE */
+
+void
+_PyObject_ObmallocTrimReusable(PyInterpreterState *interp)
+{
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+    if (!_PyDarwinVM_ReusableEnabled()) {
+        return;
+    }
+    OMState *state = interp->obmalloc;
+    if (state == NULL) {
+        return;
+    }
+    obmalloc_trim_reusable(state);
+#else
+    (void)interp;
+#endif
+}
+
 /* called when pymalloc_alloc can not allocate a block from usedpool.
  * This function takes new pool and allocate a block from it.
  */
@@ -2390,14 +2572,39 @@ allocate_from_new_pool(OMState *state, uint size)
     }
 
     /* Try to get a cached free pool. */
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+    int reuse_force_reinit = 0;
+    poolp pool;
+    if (_PyDarwinVM_ReusableEnabled()) {
+        /* Free pools are tracked in an arena-owned index stack (see
+         * obmalloc_reusable_pop), not the in-page freepools list.  The pop
+         * already unlinked the pool and, if it was reusable, issued
+         * MADV_FREE_REUSE and set reuse_force_reinit. */
+        pool = obmalloc_reusable_pop(state, usable_arenas, &reuse_force_reinit);
+    }
+    else {
+        pool = usable_arenas->freepools;
+    }
+#else
     poolp pool = usable_arenas->freepools;
+#endif
     if (LIKELY(pool != NULL)) {
         /* Unlink from cached pools. */
-        usable_arenas->freepools = pool->nextpool;
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+        if (!_PyDarwinVM_ReusableEnabled())
+#endif
+        {
+            usable_arenas->freepools = pool->nextpool;
+        }
         usable_arenas->nfreepools--;
         if (UNLIKELY(usable_arenas->nfreepools == 0)) {
             /* Wholly allocated:  remove. */
-            assert(usable_arenas->freepools == NULL);
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+            if (!_PyDarwinVM_ReusableEnabled())
+#endif
+            {
+                assert(usable_arenas->freepools == NULL);
+            }
             assert(usable_arenas->nextarena == NULL ||
                    usable_arenas->nextarena->prevarena ==
                    usable_arenas);
@@ -2411,12 +2618,18 @@ allocate_from_new_pool(OMState *state, uint size)
             /* nfreepools > 0:  it must be that freepools
              * isn't NULL, or that we haven't yet carved
              * off all the arena's pools for the first
-             * time.
+             * time.  (When the reusable feature is active free pools live in
+             * the index stack instead, so this invariant does not apply.)
              */
-            assert(usable_arenas->freepools != NULL ||
-                   usable_arenas->pool_address <=
-                   (pymem_block*)usable_arenas->address +
-                       ARENA_SIZE - POOL_SIZE);
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+            if (!_PyDarwinVM_ReusableEnabled())
+#endif
+            {
+                assert(usable_arenas->freepools != NULL ||
+                       usable_arenas->pool_address <=
+                       (pymem_block*)usable_arenas->address +
+                           ARENA_SIZE - POOL_SIZE);
+            }
         }
     }
     else {
@@ -2453,7 +2666,14 @@ allocate_from_new_pool(OMState *state, uint size)
     next->nextpool = pool;
     next->prevpool = pool;
     pool->ref.count = 1;
-    if (pool->szidx == size) {
+    if (pool->szidx == size
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+        /* A pool reclaimed from MADV_FREE_REUSABLE has undefined contents, so
+         * its header/free list cannot be trusted: always fall through to the
+         * full reinit below. */
+        && !reuse_force_reinit
+#endif
+        ) {
         /* Luckily, this pool last contained blocks
          * of the same size class, so its header
          * and free list are already initialized.
@@ -2600,8 +2820,18 @@ insert_to_freepool(OMState *state, poolp pool)
      * list, and pool->prevpool isn't used there.
      */
     struct arena_object *ao = &allarenas[pool->arenaindex];
-    pool->nextpool = ao->freepools;
-    ao->freepools = pool;
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+    if (_PyDarwinVM_ReusableEnabled()) {
+        /* Track the empty pool by index outside the pool page so the page can
+         * later be advised MADV_FREE_REUSABLE without us reading it again. */
+        obmalloc_reusable_push(ao, pool);
+    }
+    else
+#endif
+    {
+        pool->nextpool = ao->freepools;
+        ao->freepools = pool;
+    }
     uint nf = ao->nfreepools;
     /* If this is the rightmost arena with this number of free pools,
      * nfp2lasta[nf] needs to change.  Caution:  if nf is 0, there
@@ -3748,12 +3978,25 @@ pymalloc_print_stats(FILE *out)
         assert(base <= (uintptr_t) allarenas[i].pool_address);
         for (; base < (uintptr_t) allarenas[i].pool_address; base += POOL_SIZE) {
             poolp p = (poolp)base;
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+            if (_PyDarwinVM_ReusableEnabled()
+                && obmalloc_pool_is_reusable(&allarenas[i], p)) {
+                /* Reusable pools are empty; counted via nfreepools above.
+                 * Do not read the page. */
+                continue;
+            }
+#endif
             const uint sz = p->szidx;
             uint freeblocks;
 
             if (p->ref.count == 0) {
                 /* currently unused */
 #ifdef Py_DEBUG
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+                /* With the reusable feature active, empty pools are tracked in
+                 * the arena index stack, not on the freepools list. */
+                if (!_PyDarwinVM_ReusableEnabled())
+#endif
                 assert(pool_is_in_list(p, allarenas[i].freepools));
 #endif
                 continue;

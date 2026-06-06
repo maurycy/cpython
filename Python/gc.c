@@ -12,6 +12,7 @@
 #include "pycore_object.h"
 #include "pycore_object_alloc.h"  // _PyObject_MallocWithType()
 #include "pycore_pyerrors.h"
+#include "pycore_pymem.h"         // _PyObject_ObmallocTrimReusable()
 #include "pycore_pystate.h"       // _PyThreadState_GET()
 #include "pycore_tuple.h"         // _PyTuple_MaybeUntrack()
 #include "pycore_weakref.h"       // _PyWeakref_ClearRef()
@@ -1609,6 +1610,10 @@ gc_collect_main(PyThreadState *tstate, int generation, _PyGC_Reason reason)
      * generation */
     if (generation == NUM_GENERATIONS-1) {
         _PyGC_ClearAllFreeLists(tstate->interp);
+        /* macOS only, opt-in: now that a full collection has released a lot of
+         * objects, advise idle empty pymalloc pools as reusable to drop them
+         * from phys_footprint.  No-op unless the feature is enabled. */
+        _PyObject_ObmallocTrimReusable(tstate->interp);
     }
 
     if (_PyErr_Occurred(tstate)) {
