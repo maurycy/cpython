@@ -1,4 +1,5 @@
 import re
+import sys
 import textwrap
 import unittest
 
@@ -177,6 +178,45 @@ class PyMemMimallocDebugTests(PyMemDebugTests):
 class PyMemDefaultTests(PyMemDebugTests):
     # test default allocator of Python compiled in debug mode
     PYTHONMALLOC = ''
+
+
+@unittest.skipUnless(sys.platform == 'darwin', 'macOS only')
+@unittest.skipUnless(support.with_mimalloc(), 'need mimalloc')
+@requires_subprocess()
+class DarwinReusableMimallocTests(unittest.TestCase):
+    # Opt-in MADV_FREE_REUSABLE/MADV_FREE_REUSE path for the bundled mimalloc.
+    # The C shim is compiled out in debug builds (Py_DEBUG forces MI_DEBUG), so
+    # this is a build-agnostic smoke test: it churns allocations through
+    # mimalloc's purge/commit cycle and asserts the interpreter stays healthy
+    # with the feature enabled. It does not assert RSS/footprint numbers.
+    CODE = textwrap.dedent("""
+        import sys
+        # Force the object allocator through mimalloc and exercise purge/commit
+        # by repeatedly building and dropping many small objects.
+        data = []
+        for _ in range(40):
+            data = [bytes(64) for _ in range(20000)]
+            data = [[0] * 8 for _ in range(20000)]
+            data = {i: str(i) for i in range(20000)}
+            data = None
+        print("ok", flush=True)
+    """)
+
+    def test_churn_with_reusable_enabled(self):
+        out = assert_python_ok(
+            '-c', self.CODE,
+            PYTHONMALLOC='mimalloc',
+            PYTHONMALLOC_DARWIN_REUSABLE='1',
+        )
+        self.assertEqual(out.out.strip(), b"ok")
+
+    def test_churn_with_reusable_disabled(self):
+        # Same workload without the opt-in flag must behave identically.
+        out = assert_python_ok(
+            '-c', self.CODE,
+            PYTHONMALLOC='mimalloc',
+        )
+        self.assertEqual(out.out.strip(), b"ok")
 
 
 if __name__ == "__main__":

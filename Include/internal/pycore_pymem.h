@@ -100,6 +100,11 @@ extern int _PyMem_GetAllocatorName(
    PYMEM_ALLOCATOR_NOT_SET does nothing. */
 extern int _PyMem_SetupAllocators(PyMemAllocatorName allocator);
 
+/* macOS only: opt in to XNU MADV_FREE_REUSABLE/MADV_FREE_REUSE for the bundled
+   mimalloc purge/commit path.  No-op when not built with mimalloc or not on
+   macOS.  Called once during pre-configuration. */
+extern void _PyMem_DarwinReusableEnable(int enabled);
+
 // Default raw memory allocator that is not affected by PyMem_SetAllocator()
 extern void *_PyMem_DefaultRawMalloc(size_t);
 extern void *_PyMem_DefaultRawCalloc(size_t, size_t);

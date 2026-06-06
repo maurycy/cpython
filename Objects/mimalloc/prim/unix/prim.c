@@ -29,6 +29,11 @@ terms of the MIT license. A copy of the license can be found in the file
 #include <unistd.h>    // sysconf
 #include <fcntl.h>     // open, close, read, access
 
+#if defined(__APPLE__)
+// CPython: XNU reusable-memory advice helpers (MADV_FREE_REUSABLE/REUSE).
+#include "pycore_darwin_vm.h"
+#endif
+
 #if defined(__linux__)
   #include <features.h>
   #include <fcntl.h>
@@ -364,11 +369,41 @@ int _mi_prim_commit(void* start, size_t size, bool* is_zero) {
     err = errno;
     unix_mprotect_hint(err);
   }
+#if defined(_PyDarwinVM_HAVE_REUSABLE) && !MI_DEBUG && !MI_SECURE
+  // CPython: if this range was previously marked reusable in _mi_prim_decommit,
+  // reclaim it before mimalloc hands it back to users.  We cannot cheaply tell
+  // whether a given range was reusable (e.g. the first commit of freshly
+  // reserved PROT_NONE memory is not), so MADV_FREE_REUSE may run on
+  // never-reusable memory; ignore its result so it can never turn a successful
+  // commit into a failure.
+  if (err == 0 && _PyDarwinVM_ReusableEnabled()) {
+    (void)_PyDarwinVM_MarkReused(start, size);
+  }
+#endif
   return err;
 }
 
 int _mi_prim_decommit(void* start, size_t size, bool* needs_recommit) {
   int err = 0;
+  #if defined(_PyDarwinVM_HAVE_REUSABLE) && !MI_DEBUG && !MI_SECURE
+  // CPython: on macOS, MADV_DONTNEED only deactivates pages and preserves their
+  // contents, so it barely reduces phys_footprint.  When enabled, mark the range
+  // reusable (dropping it from phys_footprint) and require a recommit so that
+  // _mi_prim_commit issues the paired MADV_FREE_REUSE before the range is reused.
+  // On any failure (e.g. EINVAL over a partially-committed arena range), fall
+  // back to the original MADV_DONTNEED path.  We must return err == 0 here:
+  // mi_os_decommit_ex() already decremented the committed stat and asserts
+  // success with no rollback.
+  if (_PyDarwinVM_ReusableEnabled()) {
+    if (_PyDarwinVM_MarkReusable(start, size) == 0) {
+      *needs_recommit = true;
+      return 0;
+    }
+    err = unix_madvise(start, size, MADV_DONTNEED);
+    *needs_recommit = false;
+    return err;
+  }
+  #endif
   // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
   err = unix_madvise(start, size, MADV_DONTNEED);
   #if !MI_DEBUG && !MI_SECURE
@@ -388,6 +423,10 @@ int _mi_prim_decommit(void* start, size_t size, bool* needs_recommit) {
 }
 
 int _mi_prim_reset(void* start, size_t size) {
+  // CPython: deliberately NOT routed through MADV_FREE_REUSABLE on macOS.  Unlike
+  // decommit, reset keeps the range accessible with no notification hook before
+  // the next access, so there is nowhere to issue the paired MADV_FREE_REUSE.
+  // The reusable optimization lives in _mi_prim_decommit / _mi_prim_commit.
   // We try to use `MADV_FREE` as that is the fastest. A drawback though is that it
   // will not reduce the `rss` stats in tools like `top` even though the memory is available
   // to other processes. With the default `MIMALLOC_PURGE_DECOMMITS=1` we ensure that by

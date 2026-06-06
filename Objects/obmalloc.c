@@ -15,6 +15,9 @@
 #include <stdbool.h>
 #include <stdio.h>                // fopen(), fgets(), sscanf()
 #include <errno.h>                // errno
+#ifdef __APPLE__
+#  include <unistd.h>             // sysconf()
+#endif
 #ifdef WITH_MIMALLOC
 // Forward declarations of functions used in our mimalloc modifications
 static void _PyMem_mi_page_clear_qsbr(mi_page_t *page);
@@ -23,6 +26,16 @@ static bool _PyMem_mi_page_maybe_free(mi_page_t *page, mi_page_queue_t *pq, bool
 static void _PyMem_mi_page_reclaimed(mi_page_t *page);
 static void _PyMem_mi_heap_collect_qsbr(mi_heap_t *heap);
 #  include "pycore_mimalloc.h"
+#  if defined(__APPLE__)
+// XNU reusable-memory advice for the bundled mimalloc (see pycore_darwin_vm.h).
+// Defined here so the storage lives in the same translation unit as the
+// mimalloc amalgamation included below; the inline helpers in the header read
+// these via extern declarations.  Off by default; enabled once during
+// pre-configuration by _PyMem_DarwinReusableInit().
+int _Py_mimalloc_reusable_enabled = 0;
+size_t _Py_mimalloc_reusable_pagesize = 0;
+#    include "pycore_darwin_vm.h"
+#  endif
 #  include "mimalloc/static.c"
 #  include "mimalloc/internal.h"  // for stats
 #endif
@@ -1192,6 +1205,25 @@ _PyObject_VirtualFree(void *obj, size_t size)
     size_t alloc_size = _pymalloc_virtual_alloc_size(size);
     assert(alloc_size != 0 || size == 0);
     _PyObject_Arena.free(_PyObject_Arena.ctx, obj, alloc_size);
+}
+
+
+void
+_PyMem_DarwinReusableEnable(int enabled)
+{
+#if defined(__APPLE__) && defined(WITH_MIMALLOC)
+    if (enabled) {
+        long ps = sysconf(_SC_PAGESIZE);
+        if (ps > 0) {
+            /* Only arm the feature once we have a valid page size; the inline
+               helpers in pycore_darwin_vm.h skip work when the page size is 0. */
+            _Py_mimalloc_reusable_pagesize = (size_t)ps;
+            _Py_mimalloc_reusable_enabled = 1;
+        }
+    }
+#else
+    (void)enabled;
+#endif
 }
 
 

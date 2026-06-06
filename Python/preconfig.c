@@ -941,6 +941,16 @@ _PyPreConfig_Write(const PyPreConfig *src_config)
         }
     }
 
+#if defined(__APPLE__) && defined(WITH_MIMALLOC)
+    /* macOS only: opt in to MADV_FREE_REUSABLE/MADV_FREE_REUSE for the bundled
+       mimalloc.  Honors -E / -I via use_environment.  Off unless set to "1". */
+    {
+        const char *reuse = _Py_GetEnv(config.use_environment,
+                                       "PYTHONMALLOC_DARWIN_REUSABLE");
+        _PyMem_DarwinReusableEnable(reuse != NULL && strcmp(reuse, "1") == 0);
+    }
+#endif
+
     preconfig_set_global_vars(&config);
 
     if (config.configure_locale) {
