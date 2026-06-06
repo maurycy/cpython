@@ -200,6 +200,19 @@ typedef unsigned int pymem_uint;  /* assuming >= 16 bits */
 #endif
 #endif
 
+/* macOS only: instead of munmap()-ing wholly-empty arenas, keep a small cache
+ * of them marked MADV_FREE_REUSABLE (out of phys_footprint, reclaimable for
+ * free), and MADV_FREE_REUSE them on reuse.  Lowers footprint for the retained
+ * "spare" arena and cuts mmap/munmap churn.  Requires the radix tree (so the
+ * free path never reads a cached arena's pages) and 64-bit (whole-arena madvise
+ * over page-multiple ARENA_SIZE).  Actual madvise() use is further guarded by
+ * _PyDarwinVM_HAVE_REUSABLE (pycore_darwin_vm.h) and at runtime by
+ * _Py_obmalloc_reusable_enabled. */
+#if defined(__APPLE__) && WITH_PYMALLOC_RADIX_TREE && (SIZEOF_VOID_P >= 8)
+#  define WITH_OBMALLOC_REUSABLE 1
+#  define OBMALLOC_REUSABLE_ARENA_CACHE_MAX 8
+#endif
+
 /*
  * The allocator sub-allocates <Big> blocks of memory (called arenas) aligned
  * on a page boundary. This is a reserved virtual address space for the
@@ -314,6 +327,15 @@ struct arena_object {
      */
     struct arena_object* nextarena;
     struct arena_object* prevarena;
+
+#ifdef WITH_OBMALLOC_REUSABLE
+    /* macOS: set while this arena sits in the reusable_arenas cache AND its
+     * pages have actually been advised MADV_FREE_REUSABLE (by the GC trim or a
+     * memory-pressure event).  A cached arena starts "warm" (flag 0, pages still
+     * resident) for zero-syscall reuse; new_arena() issues MADV_FREE_REUSE only
+     * when this flag is set. */
+    unsigned char darwin_reusable;
+#endif
 };
 
 #define POOL_OVERHEAD   _Py_SIZE_ROUND_UP(sizeof(struct pool_header), ALIGNMENT)
@@ -512,6 +534,16 @@ struct _obmalloc_mgmt {
     size_t narenas_highwater;
 
     Py_ssize_t raw_allocated_blocks;
+
+#ifdef WITH_OBMALLOC_REUSABLE
+    /* macOS reusable-arena cache (see WITH_OBMALLOC_REUSABLE).  Singly-linked
+     * via arena_object.nextarena; entries are wholly-empty arenas whose pages
+     * are MADV_FREE_REUSABLE, kept mapped (address != 0) but in neither
+     * usable_arenas nor unused_arena_objects.  They remain counted in
+     * narenas_currently_allocated until really munmap'd. */
+    struct arena_object* reusable_arenas;
+    uint num_reusable_arenas;
+#endif
 };
 
 

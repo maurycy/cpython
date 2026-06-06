@@ -15,6 +15,20 @@
 #include <stdbool.h>
 #include <stdio.h>                // fopen(), fgets(), sscanf()
 #include <errno.h>                // errno
+#ifdef __APPLE__
+#  include <unistd.h>             // sysconf()
+#  include "pycore_darwin_vm.h"   // _PyDarwinVM_MarkReusable()
+// Runtime gate + cached page size for the macOS reusable-arena feature
+// (see pycore_darwin_vm.h and WITH_OBMALLOC_REUSABLE).  Off by default; armed
+// once during pre-configuration by _PyMem_DarwinReusableEnable().
+int _Py_obmalloc_reusable_enabled = 0;
+size_t _Py_obmalloc_reusable_pagesize = 0;
+// The feature needs both the platform/arch gate (WITH_OBMALLOC_REUSABLE) and
+// the madvise() flags (_PyDarwinVM_HAVE_REUSABLE) to be present.
+#  if defined(WITH_OBMALLOC_REUSABLE) && defined(_PyDarwinVM_HAVE_REUSABLE)
+#    define OBMALLOC_REUSABLE_ACTIVE 1
+#  endif
+#endif
 #ifdef WITH_MIMALLOC
 // Forward declarations of functions used in our mimalloc modifications
 static void _PyMem_mi_page_clear_qsbr(mi_page_t *page);
@@ -1195,6 +1209,24 @@ _PyObject_VirtualFree(void *obj, size_t size)
 }
 
 
+void
+_PyMem_DarwinReusableEnable(int enabled)
+{
+#if defined(__APPLE__) && defined(WITH_OBMALLOC_REUSABLE)
+    if (enabled) {
+        long ps = sysconf(_SC_PAGESIZE);
+        /* ARENA_SIZE must be a whole number of OS pages for whole-arena madvise. */
+        if (ps > 0 && (ARENA_SIZE % (size_t)ps) == 0) {
+            _Py_obmalloc_reusable_pagesize = (size_t)ps;
+            _Py_obmalloc_reusable_enabled = 1;
+        }
+    }
+#else
+    (void)enabled;
+#endif
+}
+
+
 /***********************/
 /* the "raw" allocator */
 /***********************/
@@ -1791,6 +1823,10 @@ get_state(void)
 #define ntimes_arena_allocated (state->mgmt.ntimes_arena_allocated)
 #define narenas_highwater (state->mgmt.narenas_highwater)
 #define raw_allocated_blocks (state->mgmt.raw_allocated_blocks)
+#ifdef WITH_OBMALLOC_REUSABLE
+#define reusable_arenas (state->mgmt.reusable_arenas)
+#define num_reusable_arenas (state->mgmt.num_reusable_arenas)
+#endif
 
 #ifdef WITH_MIMALLOC
 static bool count_blocks(
@@ -2111,6 +2147,69 @@ arena_map_is_used(OMState *state, pymem_block *p)
 #endif /* WITH_PYMALLOC_RADIX_TREE */
 
 
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+/* Reclaim the macOS reusable-arena cache.
+ *
+ * level 0 (soft / GC trim): advise each still-warm cached arena
+ *   MADV_FREE_REUSABLE so it drops out of phys_footprint, setting
+ *   darwin_reusable on success (new_arena() will MADV_FREE_REUSE it on reuse).
+ *   The arenas stay cached and mapped.
+ * level 1 (critical / memory pressure): munmap the whole cache, truly freeing
+ *   it.  Per entry: free, address=0, return the slot to unused_arena_objects,
+ *   and decrement both num_reusable_arenas and narenas_currently_allocated
+ *   (cached arenas were counted as allocated).  No MADV_FREE_REUSE needed first
+ *   - munmap of reusable pages is harmless. */
+static void
+obmalloc_reclaim_arenas(OMState *state, int critical)
+{
+    if (!_PyDarwinVM_ReusableEnabled()) {
+        return;
+    }
+    if (critical) {
+        struct arena_object *ao = reusable_arenas;
+        while (ao != NULL) {
+            struct arena_object *next = ao->nextarena;
+            _PyObject_Arena.free(_PyObject_Arena.ctx,
+                                 (void *)ao->address, ARENA_SIZE);
+            ao->address = 0;
+            ao->darwin_reusable = 0;
+            ao->nextarena = unused_arena_objects;
+            unused_arena_objects = ao;
+            --narenas_currently_allocated;
+            ao = next;
+        }
+        reusable_arenas = NULL;
+        num_reusable_arenas = 0;
+        return;
+    }
+    for (struct arena_object *ao = reusable_arenas; ao != NULL;
+         ao = ao->nextarena) {
+        if (!ao->darwin_reusable) {
+            if (_PyDarwinVM_MarkReusable((void *)ao->address, ARENA_SIZE) == 0) {
+                ao->darwin_reusable = 1;
+            }
+        }
+    }
+}
+#endif
+
+void
+_PyObject_ObmallocTrimReusable(PyInterpreterState *interp)
+{
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+    if (!_PyDarwinVM_ReusableEnabled()) {
+        return;
+    }
+    OMState *state = interp->obmalloc;
+    if (state == NULL) {
+        return;
+    }
+    obmalloc_reclaim_arenas(state, 0);
+#else
+    (void)interp;
+#endif
+}
+
 /* Allocate a new arena.  If we run out of memory, return NULL.  Else
  * allocate a new arena, and return the address of an arena_object
  * describing the new arena.  It's expected that the caller will set
@@ -2132,6 +2231,31 @@ new_arena(OMState *state)
     if (debug_stats) {
         _PyObject_DebugMallocStats(stderr);
     }
+
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+    /* Reuse a cached, fully-empty arena (kept mapped + MADV_FREE_REUSABLE)
+     * instead of mmap()-ing a fresh one.  It was left virgin-like when cached
+     * (see insert_to_freepool), so no re-carve is needed and we never read its
+     * old contents.  Reclaim its pages with MADV_FREE_REUSE and re-mark it owned
+     * in the radix tree first. */
+    if (_PyDarwinVM_ReusableEnabled() && reusable_arenas != NULL) {
+        arenaobj = reusable_arenas;
+        if (arena_map_mark_used(state, arenaobj->address, 1)) {
+            reusable_arenas = arenaobj->nextarena;
+            num_reusable_arenas--;
+            /* Warm cache entries cost no syscall; only reclaim pages that were
+             * actually advised reusable (by the GC trim / memory pressure). */
+            if (arenaobj->darwin_reusable) {
+                (void)_PyDarwinVM_MarkReused((void *)arenaobj->address, ARENA_SIZE);
+                arenaobj->darwin_reusable = 0;
+            }
+            /* Cache reuse is not a new allocation: narenas_currently_allocated
+             * and ntimes_arena_allocated stay unchanged. */
+            return arenaobj;
+        }
+        /* radix re-mark failed (OOM): leave it cached, fall through. */
+    }
+#endif
 
     if (unused_arena_objects == NULL) {
         uint i;
@@ -2637,7 +2761,16 @@ insert_to_freepool(OMState *state, poolp pool)
      *    nfreepools.
      * 4. Else there's nothing more to do.
      */
-    if (nf == ao->ntotalpools && ao->nextarena != NULL) {
+    /* When the macOS reusable-arena feature is on we can dispose of even the
+     * last wholly-free arena (instead of keeping it as the hysteresis spare):
+     * caching it MADV_FREE_REUSABLE + MADV_FREE_REUSE already avoids thrashing,
+     * and the cached arena drops out of phys_footprint. */
+    int cache_it = 0;
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+    cache_it = (_PyDarwinVM_ReusableEnabled()
+                && num_reusable_arenas < OBMALLOC_REUSABLE_ARENA_CACHE_MAX);
+#endif
+    if (nf == ao->ntotalpools && (ao->nextarena != NULL || cache_it)) {
         /* Case 1.  First unlink ao from usable_arenas.
          */
         assert(ao->prevarena == NULL ||
@@ -2664,6 +2797,34 @@ insert_to_freepool(OMState *state, poolp pool)
             ao->nextarena->prevarena =
                 ao->prevarena;
         }
+
+#ifdef OBMALLOC_REUSABLE_ACTIVE
+        if (cache_it) {
+            /* Cache the emptied arena WARM (still resident, no madvise) for
+             * zero-syscall reuse by new_arena() - this is the throughput win and
+             * avoids mmap/munmap churn.  Its pages are advised MADV_FREE_REUSABLE
+             * lazily (GC trim / memory pressure), which sets darwin_reusable.
+             * Reset to a virgin-like state so the carved-pool loops in the stats
+             * paths skip it entirely (a wholly-free arena's pool_address is at the
+             * end) and so reuse needs no re-carve. */
+            ao->pool_address = (pymem_block *)_Py_ALIGN_UP(ao->address, POOL_SIZE);
+            ao->nfreepools = ao->ntotalpools;
+            ao->freepools = NULL;
+            ao->darwin_reusable = 0;
+#if WITH_PYMALLOC_RADIX_TREE
+            /* Reject stray pointers into the cached (empty) arena while idle;
+             * new_arena() re-marks it used on reuse. */
+            arena_map_mark_used(state, ao->address, 0);
+#endif
+            ao->prevarena = NULL;
+            ao->nextarena = reusable_arenas;
+            reusable_arenas = ao;
+            num_reusable_arenas++;
+            /* Still mapped, address kept: narenas_currently_allocated unchanged. */
+            return;
+        }
+#endif
+
         /* Record that this arena_object slot is
          * available to be reused.
          */
