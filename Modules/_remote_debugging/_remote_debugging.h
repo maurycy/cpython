@@ -295,8 +295,8 @@ typedef struct {
 
 typedef struct {
     AliasPageEntry pages[MAX_ALIAS_PAGES];
+    mach_vm_address_t region_base;
     uint64_t access_seq;
-    uint64_t target_start_tvsec;
     uint32_t probe_counter;
     int disabled;
     /* E1 instrumentation */
@@ -365,7 +365,6 @@ typedef struct {
     uint64_t alias_misses;                   // macOS alias-cache misses
     uint64_t alias_remap_failures;           // macOS remap/protect failures
     uint64_t alias_validation_fails;         // macOS alias snapshot validation failures
-    uint64_t alias_vfail_interp;             // ValidateInterpreterSnapshot failures
     uint64_t alias_vfail_tstate;             // ValidateThreadStateSnapshot failures
     uint64_t alias_vfail_frame;              // validate_frame_snapshot failures
     uint64_t alias_vfail_frame_owner;        // frame: owner out of range
@@ -755,10 +754,6 @@ extern int parse_frame_object_aliased(
     uintptr_t *previous_frame
 );
 
-extern int _Py_RemoteDebug_ValidateInterpreterSnapshot(
-    RemoteUnwinderObject *unwinder,
-    const char *interp_state_buffer
-);
 extern int _Py_RemoteDebug_ValidateThreadStateSnapshot(
     RemoteUnwinderObject *unwinder,
     const char *tstate_buffer,

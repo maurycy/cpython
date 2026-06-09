@@ -6,23 +6,6 @@
 #  define VM_FLAGS_RETURN_DATA_ADDR 0
 #endif
 
-static int
-read_target_identity(RemoteUnwinderObject *unwinder,
-                     uint64_t *start_tvsec)
-{
-    struct proc_bsdinfo info;
-    int n = proc_pidinfo(unwinder->handle.pid, PROC_PIDTBSDINFO, 0,
-                         &info, sizeof(info));
-    if (n != (int)sizeof(info)) {
-        return -1;
-    }
-    if (info.pbi_start_tvsec == 0) {
-        return -1;
-    }
-    *start_tvsec = (uint64_t)info.pbi_start_tvsec;
-    return 0;
-}
-
 /* ===== E1 instrumentation: ground-truth same-VA recycling via object_id ===== */
 #include <mach/mach_vm.h>
 
@@ -266,13 +249,8 @@ _Py_RemoteDebug_AliasDbgSetOwner(RemoteUnwinderObject *unwinder,
 }
 
 static void
-alias_deallocate_entry(AliasPageEntry *entry)
+alias_invalidate_entry(AliasPageEntry *entry)
 {
-    if (!entry->valid) {
-        return;
-    }
-    (void)mach_vm_deallocate(mach_task_self(), entry->local_page_base,
-                             entry->size);
     memset(entry, 0, sizeof(*entry));
 }
 
@@ -349,7 +327,15 @@ _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder)
         }
     }
     for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
-        alias_deallocate_entry(&cache->pages[i]);
+        alias_invalidate_entry(&cache->pages[i]);
+    }
+    if (cache->region_base != 0) {
+        mach_vm_size_t region_size =
+            (mach_vm_size_t)MAX_ALIAS_PAGES *
+            (mach_vm_size_t)unwinder->handle.page_size;
+        (void)mach_vm_deallocate(mach_task_self(), cache->region_base,
+                                 region_size);
+        cache->region_base = 0;
     }
 }
 
@@ -369,7 +355,7 @@ _Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwinder,
     uintptr_t page_base = remote_addr & ~(uintptr_t)(page_size - 1);
     AliasPageEntry *entry;
     while ((entry = alias_find_entry(unwinder, page_base)) != NULL) {
-        alias_deallocate_entry(entry);
+        alias_invalidate_entry(entry);
     }
 }
 
@@ -379,12 +365,25 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
     AliasReadCache *cache = &unwinder->alias_cache;
     memset(cache, 0, sizeof(*cache));
 
-    uint64_t start_tvsec = 0;
-    if (read_target_identity(unwinder, &start_tvsec) < 0) {
+    mach_vm_size_t region_size =
+        (mach_vm_size_t)MAX_ALIAS_PAGES *
+        (mach_vm_size_t)unwinder->handle.page_size;
+    kern_return_t kr = mach_vm_allocate(mach_task_self(),
+                                        &cache->region_base,
+                                        region_size,
+                                        VM_FLAGS_ANYWHERE);
+    if (kr != KERN_SUCCESS) {
         cache->disabled = 1;
+        return;
     }
-    else {
-        cache->target_start_tvsec = start_tvsec;
+    kr = mach_vm_protect(mach_task_self(), cache->region_base, region_size,
+                         FALSE, VM_PROT_NONE);
+    if (kr != KERN_SUCCESS) {
+        (void)mach_vm_deallocate(mach_task_self(), cache->region_base,
+                                 region_size);
+        cache->region_base = 0;
+        cache->disabled = 1;
+        return;
     }
     cache->dbg_enabled = (getenv("ALIAS_OBJID_DEBUG") != NULL);
     cache->dbg_force_deepwalk = (getenv("ALIAS_FORCE_DEEPWALK") != NULL);
@@ -437,12 +436,14 @@ _Py_RemoteDebug_AliasDbgChurnCheck(RemoteUnwinderObject *unwinder,
 static int
 alias_identity_matches(RemoteUnwinderObject *unwinder)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
-    uint64_t start_tvsec = 0;
-    if (read_target_identity(unwinder, &start_tvsec) < 0) {
+    mach_port_type_t type = 0;
+    kern_return_t kr = mach_port_type(mach_task_self(),
+                                      unwinder->handle.task, &type);
+    if (kr != KERN_SUCCESS) {
         return 0;
     }
-    return start_tvsec == cache->target_start_tvsec;
+    return ((type & MACH_PORT_TYPE_SEND) &&
+            !(type & MACH_PORT_TYPE_DEAD_NAME)) ? 1 : 0;
 }
 
 static int
@@ -477,7 +478,7 @@ alias_alloc_entry(RemoteUnwinderObject *unwinder)
     }
 
     assert(oldest != NULL);
-    alias_deallocate_entry(oldest);
+    alias_invalidate_entry(oldest);
     STATS_INC(unwinder, alias_evictions);
     return oldest;
 }
@@ -485,10 +486,12 @@ alias_alloc_entry(RemoteUnwinderObject *unwinder)
 static int
 alias_map_readonly_page(RemoteUnwinderObject *unwinder,
                         uintptr_t page_base,
-                        mach_vm_address_t *local_addr_out)
+                        AliasPageEntry *entry)
 {
+    AliasReadCache *cache = &unwinder->alias_cache;
     mach_vm_size_t page_size = (mach_vm_size_t)unwinder->handle.page_size;
-    mach_vm_address_t local_addr = 0;
+    mach_vm_address_t local_addr =
+        cache->region_base + (entry - cache->pages) * page_size;
     vm_prot_t cur_protection = VM_PROT_NONE;
     vm_prot_t max_protection = VM_PROT_NONE;
 
@@ -497,7 +500,7 @@ alias_map_readonly_page(RemoteUnwinderObject *unwinder,
         &local_addr,
         page_size,
         0,
-        VM_FLAGS_ANYWHERE | VM_FLAGS_RETURN_DATA_ADDR,
+        VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE | VM_FLAGS_RETURN_DATA_ADDR,
         unwinder->handle.task,
         (mach_vm_address_t)page_base,
         FALSE,
@@ -508,16 +511,14 @@ alias_map_readonly_page(RemoteUnwinderObject *unwinder,
         return -1;
     }
     if ((cur_protection & VM_PROT_READ) == 0) {
-        (void)mach_vm_deallocate(mach_task_self(), local_addr, page_size);
         return -1;
     }
     kr = mach_vm_protect(mach_task_self(), local_addr, page_size, FALSE,
                          VM_PROT_READ);
     if (kr != KERN_SUCCESS) {
-        (void)mach_vm_deallocate(mach_task_self(), local_addr, page_size);
         return -1;
     }
-    *local_addr_out = local_addr;
+    entry->local_page_base = local_addr;
     return 0;
 }
 
@@ -527,8 +528,9 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
                  AliasPageEntry **entry_out)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
-    mach_vm_address_t local_addr = 0;
-    if (alias_map_readonly_page(unwinder, page_base, &local_addr) < 0) {
+    AliasPageEntry *entry = alias_alloc_entry(unwinder);
+    if (alias_map_readonly_page(unwinder, page_base, entry) < 0) {
+        alias_invalidate_entry(entry);
         STATS_INC(unwinder, alias_remap_failures);
         /* measurement mode: a transient remap failure (e.g. racing a dying
          * thread's munmap) falls back to read_overwrite for this read only,
@@ -539,9 +541,7 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
         return -1;
     }
 
-    AliasPageEntry *entry = alias_alloc_entry(unwinder);
     entry->remote_page_base = page_base;
-    entry->local_page_base = local_addr;
     entry->size = (mach_vm_size_t)unwinder->handle.page_size;
     entry->access_seq = ++cache->access_seq;
     entry->valid = 1;

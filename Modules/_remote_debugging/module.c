@@ -621,18 +621,6 @@ read_interp_state_and_maybe_thread_frame(
                 interp_state_buffer) < 0) {
             return -1;
         }
-        if (!_Py_RemoteDebug_ValidateInterpreterSnapshot(
-                unwinder, interp_state_buffer)) {
-            STATS_INC(unwinder, alias_validation_fails);
-            STATS_INC(unwinder, alias_vfail_interp);
-            _Py_RemoteDebug_AliasCacheInvalidatePage(unwinder,
-                                                     interpreter_addr);
-            return _Py_RemoteDebug_ReadRemoteMemory(
-                &unwinder->handle,
-                interpreter_addr,
-                INTERP_STATE_BUFFER_SIZE,
-                interp_state_buffer);
-        }
         return 0;
     }
 #endif
@@ -1257,7 +1245,6 @@ _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
     ADD_STAT(alias_misses);
     ADD_STAT(alias_remap_failures);
     ADD_STAT(alias_validation_fails);
-    ADD_STAT(alias_vfail_interp);
     ADD_STAT(alias_vfail_tstate);
     ADD_STAT(alias_vfail_frame);
     ADD_STAT(alias_vfail_frame_owner);
