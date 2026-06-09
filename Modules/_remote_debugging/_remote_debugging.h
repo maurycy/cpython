@@ -277,10 +277,8 @@ typedef struct {
 typedef struct {
     AliasPageEntry pages[MAX_ALIAS_PAGES];
     mach_vm_address_t region_base;
-    mach_port_t notify_port;
     uint64_t access_seq;
     uint32_t probe_counter;
-    int notify_armed;
     int disabled;
 } AliasReadCache;
 #endif
