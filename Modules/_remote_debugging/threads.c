@@ -531,7 +531,9 @@ unwind_stack_for_thread(
         goto error;
     }
 
-    // In cache mode, copying stack chunks is more expensive than direct memory reads
+    // In cache mode, copying stack chunks is more expensive than direct memory reads.
+    // (Option B "proper" / ALIAS_CHUNK_DATASTACK copies chunks LAZILY inside
+    //  collect_frames_with_cache, only when the frame_cache misses - see frames.c.)
     if (!unwinder->cache_frames) {
         if (copy_stack_chunks(unwinder, *current_tstate, &chunks) < 0) {
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to copy stack chunks");

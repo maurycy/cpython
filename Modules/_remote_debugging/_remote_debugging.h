@@ -272,6 +272,14 @@ typedef struct {
     mach_vm_size_t size;
     uint64_t access_seq;
     int valid;
+    /* E1 instrumentation (only used when dbg_enabled) */
+    uint64_t dbg_objid;       /* mutable: E1 dedup baseline (check_hit updates) */
+    uint64_t dbg_offset;
+    uint64_t dbg_map_objid;   /* immutable: E3 baseline, set at map, never updated */
+    uint64_t dbg_map_offset;
+    uint32_t dbg_user_tag;
+    uint8_t  dbg_share_mode;
+    int8_t   dbg_owner;   /* -1 unknown, else _frameowner value */
 } AliasPageEntry;
 
 typedef struct {
@@ -280,6 +288,28 @@ typedef struct {
     uint64_t target_start_tvsec;
     uint32_t probe_counter;
     int disabled;
+    /* E1 instrumentation */
+    int dbg_enabled;
+    int dbg_force_deepwalk;        /* env: disable frame_cache full-hit to force deep alias walk */
+    int dbg_no_datastack;          /* env: Option B (naive) - read datastack frames via read_overwrite, not alias */
+    int dbg_chunkcopy_datastack;   /* env: Option B (proper) - bulk chunk-copy datastack in cache_frames mode; alias only interp/tstate */
+    uint64_t dbg_checks;
+    uint64_t dbg_recycle_events;
+    /* E3 detection-power instrumentation (frame reads through stale alias) */
+    uintptr_t dbg_code_type;       /* bootstrapped &PyCode_Type, 0 if unknown */
+    uint64_t dbg_frame_recyc;      /* frame reads that hit a recycled page */
+    uint64_t dbg_catch_valsnap;    /* caught by current validate_frame_snapshot */
+    uint64_t dbg_catch_obtype;     /* caught by V3 ob_type==PyCode_Type */
+    uint64_t dbg_catch_parent;     /* caught by V1 expected_parent (when set) */
+    uint64_t dbg_catch_any;        /* caught by ANY of the above */
+    uint64_t dbg_parent_available; /* recycled frame reads where expected_parent!=0 */
+    /* silent-corruption attribution: recycled frame reads per sample, split by
+     * whether the sample ultimately SUCCEEDED (emitted) or was rejected. */
+    uint64_t dbg_sample_recyc;              /* per-sample, reset each get_stack_trace */
+    uint64_t dbg_recyc_in_success;          /* stale reads landing in emitted samples */
+    uint64_t dbg_recyc_in_fail;             /* stale reads in rejected samples */
+    uint64_t dbg_samples_success_with_recyc;/* emitted samples that had >=1 stale read */
+    uint64_t dbg_samples_fail_with_recyc;   /* rejected samples that had >=1 stale read */
 } AliasReadCache;
 #endif
 
@@ -706,6 +736,8 @@ extern int _Py_RemoteDebug_AliasedRead(
 extern void _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder);
 extern void _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder);
 extern void _Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwinder, uintptr_t remote_addr);
+extern void _Py_RemoteDebug_AliasDbgSetOwner(RemoteUnwinderObject *unwinder, uintptr_t remote_addr, int owner);
+extern void _Py_RemoteDebug_AliasDbgFrameCheck(RemoteUnwinderObject *unwinder, uintptr_t address, const char *frame_buf, uintptr_t expected_parent);
 #endif
 
 /* ============================================================================

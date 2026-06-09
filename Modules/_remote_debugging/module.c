@@ -735,6 +735,12 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
 {
     STATS_INC(self, total_samples);
 
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (self->alias_cache.dbg_enabled) {
+        self->alias_cache.dbg_sample_recyc = 0;
+    }
+#endif
+
     PyObject* result = PyList_New(0);
     if (!result) {
         set_exception_cause(self, PyExc_MemoryError, "Failed to create stack trace result list");
@@ -928,6 +934,23 @@ exit:
         }
     }
     _Py_RemoteDebug_ClearCache(&self->handle);
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (self->alias_cache.dbg_enabled) {
+        AliasReadCache *c = &self->alias_cache;
+        if (result) {
+            c->dbg_recyc_in_success += c->dbg_sample_recyc;
+            if (c->dbg_sample_recyc) {
+                c->dbg_samples_success_with_recyc++;
+            }
+        }
+        else {
+            c->dbg_recyc_in_fail += c->dbg_sample_recyc;
+            if (c->dbg_sample_recyc) {
+                c->dbg_samples_fail_with_recyc++;
+            }
+        }
+    }
+#endif
     return result;
 }
 

@@ -344,6 +344,16 @@ parse_frame_object_aliased(
     uintptr_t *address_of_code_object,
     uintptr_t *previous_frame)
 {
+    if (unwinder->alias_cache.dbg_no_datastack
+            || unwinder->alias_cache.dbg_chunkcopy_datastack) {
+        /* Option B: do NOT alias the datastack. With dbg_chunkcopy_datastack the
+         * deep walk is served from bulk-copied chunks (parse_frame_from_chunks)
+         * and this fallback only handles frames not in any chunk (e.g. generator
+         * heap frames) plus the full-hit top frame - read live via read_overwrite.
+         * interp/tstate still go through the alias path. */
+        return parse_frame_object(unwinder, result, address,
+                                  address_of_code_object, previous_frame);
+    }
     char frame[SIZEOF_INTERP_FRAME];
     if (_Py_RemoteDebug_AliasedRead(
             unwinder, address, SIZEOF_INTERP_FRAME,
@@ -360,6 +370,13 @@ parse_frame_object_aliased(
         _Py_RemoteDebug_AliasCacheInvalidatePage(unwinder, address);
         return parse_frame_object(unwinder, result, address,
                                   address_of_code_object, previous_frame);
+    }
+
+    {
+        int owner = (unsigned char)GET_MEMBER(char, frame,
+            unwinder->debug_offsets.interpreter_frame.owner);
+        _Py_RemoteDebug_AliasDbgSetOwner(unwinder, address, owner);
+        _Py_RemoteDebug_AliasDbgFrameCheck(unwinder, address, frame, expected_parent);
     }
 
     return parse_frame_buffer(unwinder, result, frame,
@@ -664,6 +681,11 @@ try_full_cache_hit(
     const FrameWalkContext *ctx,
     uint64_t thread_id)
 {
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (unwinder->alias_cache.dbg_force_deepwalk) {
+        return 0;  /* experiment: force the full deep alias walk every sample */
+    }
+#endif
     if (!unwinder->frame_cache || ctx->last_profiled_frame == 0) {
         return 0;
     }
@@ -739,10 +761,31 @@ collect_frames_with_cache(
     FrameWalkContext *ctx,
     uint64_t thread_id)
 {
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (unwinder->alias_cache.dbg_force_deepwalk) {
+        /* experiment: zero last_profiled_frame so the walk never stops at a
+         * cached frame -> full cold deep alias walk every sample (defeats both
+         * full-hit and partial-hit), maximizing datastack H1 exposure. */
+        ctx->last_profiled_frame = 0;
+    }
+#endif
     int full_hit = try_full_cache_hit(unwinder, ctx, thread_id);
     if (full_hit != 0) {
         return full_hit < 0 ? -1 : 0;
     }
+
+#if defined(__APPLE__) && TARGET_OS_OSX
+    /* Option B "proper", LAZY: the frame_cache missed, so we are about to walk
+     * datastack frames. Bulk-copy the chunks now (LIVE read) so the walk serves
+     * frames from chunks instead of the alias. Only paid on a miss, not per
+     * sample. interp/tstate still use the alias. */
+    if (unwinder->alias_cache.dbg_chunkcopy_datastack
+            && ctx->chunks != NULL && ctx->chunks->count == 0) {
+        if (copy_stack_chunks(unwinder, ctx->thread_state_addr, ctx->chunks) < 0) {
+            PyErr_Clear();  /* fall back to per-frame read_overwrite path */
+        }
+    }
+#endif
 
     Py_ssize_t frames_before = PyList_GET_SIZE(ctx->frame_info);
 
