@@ -314,6 +314,7 @@ read_thread_state_and_maybe_frame(
                 unwinder, tstate_buffer, tstate_addr,
                 current_interpreter)) {
             STATS_INC(unwinder, alias_validation_fails);
+            STATS_INC(unwinder, alias_vfail_tstate);
             _Py_RemoteDebug_AliasCacheInvalidatePage(unwinder, tstate_addr);
             return _Py_RemoteDebug_ReadRemoteMemory(
                 &unwinder->handle, tstate_addr, tstate_size, tstate_buffer);
@@ -524,6 +525,14 @@ unwind_stack_for_thread(
 
     uintptr_t frame_addr = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.current_frame);
     uintptr_t base_frame_addr = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.base_frame);
+
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (unwinder->alias_cache.dbg_churn_enabled) {
+        uintptr_t dbg_chunk = GET_MEMBER(uintptr_t, ts,
+            unwinder->debug_offsets.thread_state.datastack_chunk);
+        _Py_RemoteDebug_AliasDbgChurnCheck(unwinder, *current_tstate, dbg_chunk);
+    }
+#endif
 
     frame_info = PyList_New(0);
     if (!frame_info) {

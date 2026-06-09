@@ -224,10 +224,16 @@ def requires_subinterpreters(meth):
 # Simple wrapper functions for RemoteUnwinder
 # ============================================================================
 
+# Set TEI_CACHE_FRAMES=1 to run the whole suite through the cache_frames=True
+# (macOS alias fast-path) configuration instead of the default chunk-copy.
+TEI_CACHE_FRAMES = os.environ.get("TEI_CACHE_FRAMES") == "1"
+
+
 def get_stack_trace(pid):
     for _ in busy_retry(SHORT_TIMEOUT):
         try:
-            unwinder = RemoteUnwinder(pid, all_threads=True, debug=True)
+            unwinder = RemoteUnwinder(pid, all_threads=True, debug=True,
+                                      cache_frames=TEI_CACHE_FRAMES)
             return unwinder.get_stack_trace()
         except RuntimeError as e:
             continue
@@ -237,7 +243,8 @@ def get_stack_trace(pid):
 def get_async_stack_trace(pid):
     for _ in busy_retry(SHORT_TIMEOUT):
         try:
-            unwinder = RemoteUnwinder(pid, debug=True)
+            unwinder = RemoteUnwinder(pid, debug=True,
+                                      cache_frames=TEI_CACHE_FRAMES)
             return unwinder.get_async_stack_trace()
         except RuntimeError as e:
             continue
@@ -247,7 +254,8 @@ def get_async_stack_trace(pid):
 def get_all_awaited_by(pid):
     for _ in busy_retry(SHORT_TIMEOUT):
         try:
-            unwinder = RemoteUnwinder(pid, debug=True)
+            unwinder = RemoteUnwinder(pid, debug=True,
+                                      cache_frames=TEI_CACHE_FRAMES)
             return unwinder.get_all_awaited_by()
         except RuntimeError as e:
             continue

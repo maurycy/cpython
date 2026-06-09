@@ -624,6 +624,7 @@ read_interp_state_and_maybe_thread_frame(
         if (!_Py_RemoteDebug_ValidateInterpreterSnapshot(
                 unwinder, interp_state_buffer)) {
             STATS_INC(unwinder, alias_validation_fails);
+            STATS_INC(unwinder, alias_vfail_interp);
             _Py_RemoteDebug_AliasCacheInvalidatePage(unwinder,
                                                      interpreter_addr);
             return _Py_RemoteDebug_ReadRemoteMemory(
@@ -738,6 +739,11 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
 #if defined(__APPLE__) && TARGET_OS_OSX
     if (self->alias_cache.dbg_enabled) {
         self->alias_cache.dbg_sample_recyc = 0;
+        self->alias_cache.dbg_sample_recycle_events = 0;
+    }
+    if (self->alias_cache.dbg_churn_enabled) {
+        self->alias_cache.dbg_sample_tick = 0;
+        self->alias_cache.dbg_sample_churn_valid = 0;
     }
 #endif
 
@@ -947,6 +953,26 @@ exit:
             c->dbg_recyc_in_fail += c->dbg_sample_recyc;
             if (c->dbg_sample_recyc) {
                 c->dbg_samples_fail_with_recyc++;
+            }
+        }
+        if (c->dbg_sample_churn_valid) {
+            if (c->dbg_sample_recycle_events) {
+                if (c->dbg_sample_tick) {
+                    c->dbg_recycle_in_tick += c->dbg_sample_recycle_events;
+                    c->dbg_samples_recycle_tick++;
+                }
+                else {
+                    c->dbg_recycle_in_notick += c->dbg_sample_recycle_events;
+                    c->dbg_samples_recycle_notick++;
+                }
+            }
+            if (c->dbg_sample_recyc) {
+                if (c->dbg_sample_tick) {
+                    c->dbg_frecyc_in_tick += c->dbg_sample_recyc;
+                }
+                else {
+                    c->dbg_frecyc_in_notick += c->dbg_sample_recyc;
+                }
             }
         }
     }
@@ -1231,6 +1257,13 @@ _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
     ADD_STAT(alias_misses);
     ADD_STAT(alias_remap_failures);
     ADD_STAT(alias_validation_fails);
+    ADD_STAT(alias_vfail_interp);
+    ADD_STAT(alias_vfail_tstate);
+    ADD_STAT(alias_vfail_frame);
+    ADD_STAT(alias_vfail_frame_owner);
+    ADD_STAT(alias_vfail_frame_executable);
+    ADD_STAT(alias_vfail_frame_previous);
+    ADD_STAT(alias_vfail_frame_parent);
     ADD_STAT(alias_evictions);
     ADD_STAT(alias_identity_mismatches);
 

@@ -318,6 +318,7 @@ validate_frame_snapshot(
     int owner = (unsigned char)GET_MEMBER(char, frame,
         unwinder->debug_offsets.interpreter_frame.owner);
     if (owner < FRAME_OWNED_BY_THREAD || owner > FRAME_OWNED_BY_INTERPRETER) {
+        STATS_INC(unwinder, alias_vfail_frame_owner);
         return 0;
     }
 
@@ -325,11 +326,16 @@ validate_frame_snapshot(
         unwinder->debug_offsets.interpreter_frame.executable);
     uintptr_t previous = GET_MEMBER(uintptr_t, frame,
         unwinder->debug_offsets.interpreter_frame.previous);
-    if (!remote_pointer_plausible(unwinder, executable)
-            || !remote_pointer_plausible(unwinder, previous)) {
+    if (!remote_pointer_plausible(unwinder, executable)) {
+        STATS_INC(unwinder, alias_vfail_frame_executable);
+        return 0;
+    }
+    if (!remote_pointer_plausible(unwinder, previous)) {
+        STATS_INC(unwinder, alias_vfail_frame_previous);
         return 0;
     }
     if (expected_parent != 0 && previous != expected_parent) {
+        STATS_INC(unwinder, alias_vfail_frame_parent);
         return 0;
     }
     return 1;
@@ -367,6 +373,7 @@ parse_frame_object_aliased(
 
     if (!validate_frame_snapshot(unwinder, frame, expected_parent)) {
         STATS_INC(unwinder, alias_validation_fails);
+        STATS_INC(unwinder, alias_vfail_frame);
         _Py_RemoteDebug_AliasCacheInvalidatePage(unwinder, address);
         return parse_frame_object(unwinder, result, address,
                                   address_of_code_object, previous_frame);

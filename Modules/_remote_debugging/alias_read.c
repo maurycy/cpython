@@ -101,19 +101,24 @@ alias_dbg_check_hit(RemoteUnwinderObject *unwinder, AliasPageEntry *entry)
                                &objid, &offset, &tag, &share) < 0) {
         /* region gone entirely: that is also a recycling/unmap event */
         cache->dbg_recycle_events++;
+        cache->dbg_sample_recycle_events++;
         fprintf(stderr,
-            "[aliasdbg] RECYCLE(unmapped) page=0x%llx old_objid=0x%llx owner=%d\n",
+            "[aliasdbg] RECYCLE(unmapped) page=0x%llx old_objid=0x%llx owner=%d "
+            "sample=%llu tick=%d\n",
             (unsigned long long)entry->remote_page_base,
-            (unsigned long long)entry->dbg_objid, entry->dbg_owner);
+            (unsigned long long)entry->dbg_objid, entry->dbg_owner,
+            (unsigned long long)unwinder->stats.total_samples,
+            cache->dbg_sample_tick);
         entry->dbg_objid = 0;
         return;
     }
     if (objid != entry->dbg_objid || offset != entry->dbg_offset) {
         cache->dbg_recycle_events++;
+        cache->dbg_sample_recycle_events++;
         fprintf(stderr,
             "[aliasdbg] RECYCLE page=0x%llx old_objid=0x%llx new_objid=0x%llx "
             "old_off=0x%llx new_off=0x%llx tag=%u share=%u owner=%d "
-            "is_tstate=%d is_interp=%d\n",
+            "is_tstate=%d is_interp=%d sample=%llu tick=%d\n",
             (unsigned long long)entry->remote_page_base,
             (unsigned long long)entry->dbg_objid, (unsigned long long)objid,
             (unsigned long long)entry->dbg_offset, (unsigned long long)offset,
@@ -121,7 +126,9 @@ alias_dbg_check_hit(RemoteUnwinderObject *unwinder, AliasPageEntry *entry)
             (entry->remote_page_base ==
                 (unwinder->tstate_addr & ~((uintptr_t)unwinder->handle.page_size - 1))),
             (entry->remote_page_base ==
-                (unwinder->interpreter_addr & ~((uintptr_t)unwinder->handle.page_size - 1))));
+                (unwinder->interpreter_addr & ~((uintptr_t)unwinder->handle.page_size - 1))),
+            (unsigned long long)unwinder->stats.total_samples,
+            cache->dbg_sample_tick);
         entry->dbg_objid = objid;
         entry->dbg_offset = offset;
     }
@@ -310,6 +317,37 @@ _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder)
             (unsigned long long)cache->dbg_samples_success_with_recyc,
             (unsigned long long)cache->dbg_samples_fail_with_recyc);
     }
+    if (cache->dbg_churn_enabled && cache->dbg_churn_checks > 0) {
+        fprintf(stderr,
+            "[aliasdbg] CHURN checks=%llu ticks=%llu\n",
+            (unsigned long long)cache->dbg_churn_checks,
+            (unsigned long long)cache->dbg_churn_ticks);
+        if (cache->dbg_enabled) {
+            fprintf(stderr,
+                "[aliasdbg] CHURN-XCOR recycle_in_tick=%llu recycle_in_notick=%llu "
+                "frecyc_in_tick=%llu frecyc_in_notick=%llu "
+                "samples_recycle_tick=%llu samples_recycle_notick=%llu\n",
+                (unsigned long long)cache->dbg_recycle_in_tick,
+                (unsigned long long)cache->dbg_recycle_in_notick,
+                (unsigned long long)cache->dbg_frecyc_in_tick,
+                (unsigned long long)cache->dbg_frecyc_in_notick,
+                (unsigned long long)cache->dbg_samples_recycle_tick,
+                (unsigned long long)cache->dbg_samples_recycle_notick);
+        }
+        for (int i = 0; i < ALIAS_DBG_CHURN_SLOTS; i++) {
+            AliasDbgChurnSlot *s = &cache->dbg_churn[i];
+            if (s->tstate_addr == 0) {
+                break;
+            }
+            if (s->checks > 0) {
+                fprintf(stderr,
+                    "[aliasdbg] CHURN-THREAD tstate=0x%llx checks=%llu ticks=%llu\n",
+                    (unsigned long long)s->tstate_addr,
+                    (unsigned long long)s->checks,
+                    (unsigned long long)s->ticks);
+            }
+        }
+    }
     for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
         alias_deallocate_entry(&cache->pages[i]);
     }
@@ -352,6 +390,48 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
     cache->dbg_force_deepwalk = (getenv("ALIAS_FORCE_DEEPWALK") != NULL);
     cache->dbg_no_datastack = (getenv("ALIAS_NO_DATASTACK") != NULL);
     cache->dbg_chunkcopy_datastack = (getenv("ALIAS_CHUNK_DATASTACK") != NULL);
+    cache->dbg_churn_enabled =
+        (cache->dbg_enabled || getenv("ALIAS_CHURN_DEBUG") != NULL);
+    cache->dbg_soft_remap_fail = (getenv("ALIAS_SOFT_REMAP_FAIL") != NULL);
+}
+
+/* churn sensor: compare the live tstate->datastack_chunk pointer against the
+ * value seen at the previous sample of the same thread. The pointer comes from
+ * the tstate buffer the unwinder already read this sample, so the sensor adds
+ * no remote reads. First sighting of a tstate records a baseline, no tick. */
+void
+_Py_RemoteDebug_AliasDbgChurnCheck(RemoteUnwinderObject *unwinder,
+                                   uintptr_t tstate_addr, uintptr_t chunk_ptr)
+{
+    AliasReadCache *cache = &unwinder->alias_cache;
+    if (!cache->dbg_churn_enabled || tstate_addr == 0) {
+        return;
+    }
+    AliasDbgChurnSlot *slot = NULL;
+    for (int i = 0; i < ALIAS_DBG_CHURN_SLOTS; i++) {
+        AliasDbgChurnSlot *s = &cache->dbg_churn[i];
+        if (s->tstate_addr == tstate_addr) {
+            slot = s;
+            break;
+        }
+        if (s->tstate_addr == 0) {
+            s->tstate_addr = tstate_addr;
+            s->last_chunk = chunk_ptr;
+            return;
+        }
+    }
+    if (slot == NULL) {
+        return;
+    }
+    slot->checks++;
+    cache->dbg_churn_checks++;
+    cache->dbg_sample_churn_valid = 1;
+    if (chunk_ptr != slot->last_chunk) {
+        slot->ticks++;
+        cache->dbg_churn_ticks++;
+        cache->dbg_sample_tick = 1;
+        slot->last_chunk = chunk_ptr;
+    }
 }
 
 static int
@@ -450,7 +530,12 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
     mach_vm_address_t local_addr = 0;
     if (alias_map_readonly_page(unwinder, page_base, &local_addr) < 0) {
         STATS_INC(unwinder, alias_remap_failures);
-        alias_disable_runtime(unwinder);
+        /* measurement mode: a transient remap failure (e.g. racing a dying
+         * thread's munmap) falls back to read_overwrite for this read only,
+         * instead of latching the alias off for the unwinder's lifetime. */
+        if (!cache->dbg_soft_remap_fail) {
+            alias_disable_runtime(unwinder);
+        }
         return -1;
     }
 

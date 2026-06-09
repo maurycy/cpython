@@ -282,6 +282,17 @@ typedef struct {
     int8_t   dbg_owner;   /* -1 unknown, else _frameowner value */
 } AliasPageEntry;
 
+/* churn-sensor instrumentation: per-sampled-tstate tracking of the live
+ * tstate->datastack_chunk pointer across samples. A "tick" is a change of
+ * the pointer between two consecutive samples of the same thread. */
+#define ALIAS_DBG_CHURN_SLOTS 64
+typedef struct {
+    uintptr_t tstate_addr;
+    uintptr_t last_chunk;
+    uint64_t checks;   /* comparisons performed (excludes first sighting) */
+    uint64_t ticks;    /* pointer changes observed */
+} AliasDbgChurnSlot;
+
 typedef struct {
     AliasPageEntry pages[MAX_ALIAS_PAGES];
     uint64_t access_seq;
@@ -293,6 +304,7 @@ typedef struct {
     int dbg_force_deepwalk;        /* env: disable frame_cache full-hit to force deep alias walk */
     int dbg_no_datastack;          /* env: Option B (naive) - read datastack frames via read_overwrite, not alias */
     int dbg_chunkcopy_datastack;   /* env: Option B (proper) - bulk chunk-copy datastack in cache_frames mode; alias only interp/tstate */
+    int dbg_soft_remap_fail;       /* env: do not latch the alias off on a remap failure (measurement) */
     uint64_t dbg_checks;
     uint64_t dbg_recycle_events;
     /* E3 detection-power instrumentation (frame reads through stale alias) */
@@ -310,6 +322,24 @@ typedef struct {
     uint64_t dbg_recyc_in_fail;             /* stale reads in rejected samples */
     uint64_t dbg_samples_success_with_recyc;/* emitted samples that had >=1 stale read */
     uint64_t dbg_samples_fail_with_recyc;   /* rejected samples that had >=1 stale read */
+    /* churn-sensor instrumentation (dbg_enabled or ALIAS_CHURN_DEBUG) */
+    int dbg_churn_enabled;
+    AliasDbgChurnSlot dbg_churn[ALIAS_DBG_CHURN_SLOTS];
+    uint64_t dbg_churn_checks;
+    uint64_t dbg_churn_ticks;
+    /* churn-vs-recycle cross-correlation (needs the oracle, i.e. dbg_enabled):
+     * attributes each sample's oracle-detected recycle events and stale frame
+     * reads by whether the churn sensor ticked in that sample. The notick
+     * buckets are the sensor's per-event miss (pointer-level ABA). */
+    int dbg_sample_tick;                 /* per-sample: any churn tick observed */
+    int dbg_sample_churn_valid;          /* per-sample: sensor compared (not first sighting) */
+    uint64_t dbg_sample_recycle_events;  /* per-sample: oracle recycle events */
+    uint64_t dbg_recycle_in_tick;        /* recycle events in samples with a tick */
+    uint64_t dbg_recycle_in_notick;      /* recycle events in samples without a tick */
+    uint64_t dbg_frecyc_in_tick;         /* stale frame reads in samples with a tick */
+    uint64_t dbg_frecyc_in_notick;       /* stale frame reads in samples without a tick */
+    uint64_t dbg_samples_recycle_tick;   /* samples with >=1 recycle event and a tick */
+    uint64_t dbg_samples_recycle_notick; /* samples with >=1 recycle event, no tick */
 } AliasReadCache;
 #endif
 
@@ -335,6 +365,13 @@ typedef struct {
     uint64_t alias_misses;                   // macOS alias-cache misses
     uint64_t alias_remap_failures;           // macOS remap/protect failures
     uint64_t alias_validation_fails;         // macOS alias snapshot validation failures
+    uint64_t alias_vfail_interp;             // ValidateInterpreterSnapshot failures
+    uint64_t alias_vfail_tstate;             // ValidateThreadStateSnapshot failures
+    uint64_t alias_vfail_frame;              // validate_frame_snapshot failures
+    uint64_t alias_vfail_frame_owner;        // frame: owner out of range
+    uint64_t alias_vfail_frame_executable;   // frame: implausible executable pointer
+    uint64_t alias_vfail_frame_previous;     // frame: implausible previous pointer
+    uint64_t alias_vfail_frame_parent;       // frame: previous != expected_parent
     uint64_t alias_evictions;                // macOS alias-cache LRU evictions
     uint64_t alias_identity_mismatches;      // macOS target identity mismatches
 } UnwinderStats;
@@ -738,6 +775,7 @@ extern void _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder);
 extern void _Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwinder, uintptr_t remote_addr);
 extern void _Py_RemoteDebug_AliasDbgSetOwner(RemoteUnwinderObject *unwinder, uintptr_t remote_addr, int owner);
 extern void _Py_RemoteDebug_AliasDbgFrameCheck(RemoteUnwinderObject *unwinder, uintptr_t address, const char *frame_buf, uintptr_t expected_parent);
+extern void _Py_RemoteDebug_AliasDbgChurnCheck(RemoteUnwinderObject *unwinder, uintptr_t tstate_addr, uintptr_t chunk_ptr);
 #endif
 
 /* ============================================================================
