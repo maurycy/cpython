@@ -6,23 +6,6 @@
 #  define VM_FLAGS_RETURN_DATA_ADDR 0
 #endif
 
-static int
-read_target_identity(RemoteUnwinderObject *unwinder,
-                     uint64_t *start_tvsec)
-{
-    struct proc_bsdinfo info;
-    int n = proc_pidinfo(unwinder->handle.pid, PROC_PIDTBSDINFO, 0,
-                         &info, sizeof(info));
-    if (n != (int)sizeof(info)) {
-        return -1;
-    }
-    if (info.pbi_start_tvsec == 0) {
-        return -1;
-    }
-    *start_tvsec = (uint64_t)info.pbi_start_tvsec;
-    return 0;
-}
-
 static void
 alias_deallocate_entry(AliasPageEntry *entry)
 {
@@ -81,25 +64,18 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
     memset(cache, 0, sizeof(*cache));
-
-    uint64_t start_tvsec = 0;
-    if (read_target_identity(unwinder, &start_tvsec) < 0) {
-        cache->disabled = 1;
-    }
-    else {
-        cache->target_start_tvsec = start_tvsec;
-    }
 }
 
 static int
 alias_identity_matches(RemoteUnwinderObject *unwinder)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
-    uint64_t start_tvsec = 0;
-    if (read_target_identity(unwinder, &start_tvsec) < 0) {
-        return 0;
-    }
-    return start_tvsec == cache->target_start_tvsec;
+    task_basic_info_data_t task_basic_info;
+    mach_msg_type_number_t task_info_count = TASK_BASIC_INFO_COUNT;
+    kern_return_t task_valid_check = task_info(unwinder->handle.task,
+                                               TASK_BASIC_INFO,
+                                               (task_info_t)&task_basic_info,
+                                               &task_info_count);
+    return task_valid_check == KERN_SUCCESS;
 }
 
 static int
