@@ -277,7 +277,6 @@ typedef struct {
 typedef struct {
     AliasPageEntry pages[MAX_ALIAS_PAGES];
     uint64_t access_seq;
-    uint64_t target_start_tvsec;
     uint32_t probe_counter;
     int disabled;
 } AliasReadCache;
