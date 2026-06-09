@@ -2,8 +2,6 @@
 
 #if defined(__APPLE__) && TARGET_OS_OSX
 
-#include <mach/notify.h>
-
 #ifndef VM_FLAGS_RETURN_DATA_ADDR
 #  define VM_FLAGS_RETURN_DATA_ADDR 0
 #endif
@@ -42,12 +40,6 @@ _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder)
                                  region_size);
         cache->region_base = 0;
     }
-    if (cache->notify_port != MACH_PORT_NULL) {
-        (void)mach_port_mod_refs(mach_task_self(), cache->notify_port,
-                                 MACH_PORT_RIGHT_RECEIVE, -1);
-        cache->notify_port = MACH_PORT_NULL;
-    }
-    cache->notify_armed = 0;
 }
 
 static void
@@ -96,38 +88,10 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
         cache->disabled = 1;
         return;
     }
-
-    mach_port_t notify_port = MACH_PORT_NULL;
-    kr = mach_port_allocate(mach_task_self(),
-                            MACH_PORT_RIGHT_RECEIVE,
-                            &notify_port);
-    if (kr != KERN_SUCCESS) {
-        return;
-    }
-
-    mach_port_t previous = MACH_PORT_NULL;
-    kr = mach_port_request_notification(mach_task_self(),
-                                        unwinder->handle.task,
-                                        MACH_NOTIFY_DEAD_NAME,
-                                        1,
-                                        notify_port,
-                                        MACH_MSG_TYPE_MAKE_SEND_ONCE,
-                                        &previous);
-    if (previous != MACH_PORT_NULL) {
-        (void)mach_port_deallocate(mach_task_self(), previous);
-    }
-    if (kr != KERN_SUCCESS) {
-        (void)mach_port_mod_refs(mach_task_self(), notify_port,
-                                 MACH_PORT_RIGHT_RECEIVE, -1);
-        return;
-    }
-
-    cache->notify_port = notify_port;
-    cache->notify_armed = 1;
 }
 
 static int
-alias_identity_matches_fallback(RemoteUnwinderObject *unwinder)
+alias_identity_matches(RemoteUnwinderObject *unwinder)
 {
     mach_port_type_t type = 0;
     kern_return_t kr = mach_port_type(mach_task_self(),
@@ -137,47 +101,6 @@ alias_identity_matches_fallback(RemoteUnwinderObject *unwinder)
     }
     return ((type & MACH_PORT_TYPE_SEND) &&
             !(type & MACH_PORT_TYPE_DEAD_NAME)) ? 1 : 0;
-}
-
-static int
-alias_identity_matches(RemoteUnwinderObject *unwinder)
-{
-    AliasReadCache *cache = &unwinder->alias_cache;
-    if (!cache->notify_armed) {
-        return alias_identity_matches_fallback(unwinder);
-    }
-
-    union {
-        mach_dead_name_notification_t dead_name;
-        struct {
-            mach_msg_header_t header;
-            mach_msg_trailer_t trailer;
-        } msg;
-        char storage[sizeof(mach_dead_name_notification_t) +
-                     sizeof(mach_msg_trailer_t)];
-    } msg;
-    memset(&msg, 0, sizeof(msg));
-
-    mach_msg_return_t mr = mach_msg(&msg.msg.header,
-                                    MACH_RCV_MSG | MACH_RCV_TIMEOUT,
-                                    0,
-                                    (mach_msg_size_t)sizeof(msg),
-                                    cache->notify_port,
-                                    0,
-                                    MACH_PORT_NULL);
-    if (mr == MACH_RCV_TIMED_OUT) {
-        return 1;
-    }
-    if (mr == MACH_MSG_SUCCESS &&
-        msg.msg.header.msgh_id == MACH_NOTIFY_DEAD_NAME)
-    {
-        if (msg.dead_name.not_port != MACH_PORT_NULL) {
-            (void)mach_port_deallocate(mach_task_self(),
-                                       msg.dead_name.not_port);
-        }
-        return 0;
-    }
-    return 0;
 }
 
 static int
