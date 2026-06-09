@@ -297,12 +297,9 @@ validate_frame_snapshot(
         return 0;
     }
 
-    uintptr_t executable = GET_MEMBER_NO_TAG(uintptr_t, frame,
-        unwinder->debug_offsets.interpreter_frame.executable);
     uintptr_t previous = GET_MEMBER(uintptr_t, frame,
         unwinder->debug_offsets.interpreter_frame.previous);
-    if (!remote_pointer_plausible(unwinder, executable)
-            || !remote_pointer_plausible(unwinder, previous)) {
+    if (!remote_pointer_plausible(unwinder, previous)) {
         return 0;
     }
     if (expected_parent != 0 && previous != expected_parent) {
