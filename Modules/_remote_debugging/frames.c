@@ -298,14 +298,8 @@ validate_frame_snapshot(
         return 0;
     }
 
-    uintptr_t executable = GET_MEMBER_NO_TAG(uintptr_t, frame,
-        unwinder->debug_offsets.interpreter_frame.executable);
     uintptr_t previous = GET_MEMBER(uintptr_t, frame,
         unwinder->debug_offsets.interpreter_frame.previous);
-    if (!remote_pointer_plausible(unwinder, executable)) {
-        STATS_INC(unwinder, alias_vfail_frame_executable);
-        return 0;
-    }
     if (!remote_pointer_plausible(unwinder, previous)) {
         STATS_INC(unwinder, alias_vfail_frame_previous);
         return 0;

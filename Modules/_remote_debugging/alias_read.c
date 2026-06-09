@@ -248,6 +248,36 @@ _Py_RemoteDebug_AliasDbgSetOwner(RemoteUnwinderObject *unwinder,
     }
 }
 
+static int
+alias_query_region(task_t task,
+                   mach_vm_address_t addr,
+                   uint64_t *objid,
+                   uint64_t *offset)
+{
+    mach_vm_address_t region_addr = addr;
+    mach_vm_size_t region_size = 0;
+    natural_t depth = 0;
+    vm_region_submap_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
+
+    kern_return_t kr = mach_vm_region_recurse(
+        task, &region_addr, &region_size, &depth,
+        (vm_region_recurse_info_t)&info, &count);
+    if (kr == MACH_SEND_INVALID_DEST || kr == KERN_INVALID_ARGUMENT) {
+        return -1;
+    }
+    if (kr != KERN_SUCCESS || addr < region_addr ||
+        (mach_vm_size_t)(addr - region_addr) >= region_size ||
+        info.is_submap)
+    {
+        return 1;
+    }
+
+    *objid = info.object_id_full;
+    *offset = info.offset + (uint64_t)(addr - region_addr);
+    return 0;
+}
+
 static void
 alias_invalidate_entry(AliasPageEntry *entry)
 {
@@ -364,6 +394,7 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
     memset(cache, 0, sizeof(*cache));
+    cache->probe_mask = ALIAS_PROBE_DEFAULT_MASK;
 
     mach_vm_size_t region_size =
         (mach_vm_size_t)MAX_ALIAS_PAGES *
@@ -391,7 +422,6 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
     cache->dbg_chunkcopy_datastack = (getenv("ALIAS_CHUNK_DATASTACK") != NULL);
     cache->dbg_churn_enabled =
         (cache->dbg_enabled || getenv("ALIAS_CHURN_DEBUG") != NULL);
-    cache->dbg_soft_remap_fail = (getenv("ALIAS_SOFT_REMAP_FAIL") != NULL);
 }
 
 /* churn sensor: compare the live tstate->datastack_chunk pointer against the
@@ -434,30 +464,38 @@ _Py_RemoteDebug_AliasDbgChurnCheck(RemoteUnwinderObject *unwinder,
 }
 
 static int
-alias_identity_matches(RemoteUnwinderObject *unwinder)
-{
-    mach_port_type_t type = 0;
-    kern_return_t kr = mach_port_type(mach_task_self(),
-                                      unwinder->handle.task, &type);
-    if (kr != KERN_SUCCESS) {
-        return 0;
-    }
-    return ((type & MACH_PORT_TYPE_SEND) &&
-            !(type & MACH_PORT_TYPE_DEAD_NAME)) ? 1 : 0;
-}
-
-static int
-alias_maybe_probe_identity(RemoteUnwinderObject *unwinder)
+alias_maybe_probe_entry(RemoteUnwinderObject *unwinder,
+                        AliasPageEntry *entry)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
-    if ((++cache->probe_counter & ALIAS_PROBE_MASK) != 0) {
+    if ((++cache->probe_counter & cache->probe_mask) != 0) {
         return 1;
     }
-    if (alias_identity_matches(unwinder)) {
+    STATS_INC(unwinder, alias_probe_checks);
+
+    uint64_t objid = 0;
+    uint64_t offset = 0;
+    int rc = alias_query_region(unwinder->handle.task,
+                                entry->remote_page_base,
+                                &objid, &offset);
+    if (rc < 0) {
+        STATS_INC(unwinder, alias_identity_mismatches);
+        alias_disable_runtime(unwinder);
+        return -1;
+    }
+    if (rc == 0 && objid == entry->map_objid &&
+        offset == entry->map_offset)
+    {
+        if (cache->probe_mask < ALIAS_PROBE_MAX_MASK) {
+            cache->probe_mask = (cache->probe_mask << 1) | 1;
+        }
         return 1;
     }
-    STATS_INC(unwinder, alias_identity_mismatches);
-    alias_disable_runtime(unwinder);
+    STATS_INC(unwinder, alias_probe_recycles);
+    if (cache->probe_mask > ALIAS_PROBE_MIN_MASK) {
+        cache->probe_mask >>= 1;
+    }
+    alias_invalidate_entry(entry);
     return 0;
 }
 
@@ -483,7 +521,7 @@ alias_alloc_entry(RemoteUnwinderObject *unwinder)
     return oldest;
 }
 
-static int
+static kern_return_t
 alias_map_readonly_page(RemoteUnwinderObject *unwinder,
                         uintptr_t page_base,
                         AliasPageEntry *entry)
@@ -508,18 +546,18 @@ alias_map_readonly_page(RemoteUnwinderObject *unwinder,
         &max_protection,
         VM_INHERIT_NONE);
     if (kr != KERN_SUCCESS) {
-        return -1;
+        return kr;
     }
     if ((cur_protection & VM_PROT_READ) == 0) {
-        return -1;
+        return KERN_PROTECTION_FAILURE;
     }
     kr = mach_vm_protect(mach_task_self(), local_addr, page_size, FALSE,
                          VM_PROT_READ);
     if (kr != KERN_SUCCESS) {
-        return -1;
+        return kr;
     }
     entry->local_page_base = local_addr;
-    return 0;
+    return KERN_SUCCESS;
 }
 
 static int
@@ -529,13 +567,12 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
 {
     AliasReadCache *cache = &unwinder->alias_cache;
     AliasPageEntry *entry = alias_alloc_entry(unwinder);
-    if (alias_map_readonly_page(unwinder, page_base, entry) < 0) {
+    kern_return_t kr = alias_map_readonly_page(unwinder, page_base, entry);
+    if (kr != KERN_SUCCESS) {
         alias_invalidate_entry(entry);
         STATS_INC(unwinder, alias_remap_failures);
-        /* measurement mode: a transient remap failure (e.g. racing a dying
-         * thread's munmap) falls back to read_overwrite for this read only,
-         * instead of latching the alias off for the unwinder's lifetime. */
-        if (!cache->dbg_soft_remap_fail) {
+        if (kr == MACH_SEND_INVALID_DEST || kr == KERN_INVALID_ARGUMENT) {
+            STATS_INC(unwinder, alias_identity_mismatches);
             alias_disable_runtime(unwinder);
         }
         return -1;
@@ -546,6 +583,14 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
     entry->access_seq = ++cache->access_seq;
     entry->valid = 1;
     alias_dbg_record_map(unwinder, entry);
+
+    if (alias_query_region(mach_task_self(), entry->local_page_base,
+                           &entry->map_objid, &entry->map_offset) != 0)
+    {
+        alias_invalidate_entry(entry);
+        STATS_INC(unwinder, alias_remap_failures);
+        return -1;
+    }
 
     *entry_out = entry;
     return 0;
@@ -593,15 +638,18 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
 
     AliasPageEntry *entry = alias_find_entry(unwinder, page_base);
     if (entry != NULL) {
-        if (!alias_maybe_probe_identity(unwinder)) {
+        int probe = alias_maybe_probe_entry(unwinder, entry);
+        if (probe < 0) {
             return _Py_RemoteDebug_ReadRemoteMemory(
                 &unwinder->handle, remote_addr, len, dst);
         }
-        entry->access_seq = ++cache->access_seq;
-        alias_dbg_check_hit(unwinder, entry);
-        memcpy(dst, (const char *)entry->local_page_base + offset, len);
-        STATS_INC(unwinder, alias_hits);
-        return 0;
+        if (probe > 0) {
+            entry->access_seq = ++cache->access_seq;
+            alias_dbg_check_hit(unwinder, entry);
+            memcpy(dst, (const char *)entry->local_page_base + offset, len);
+            STATS_INC(unwinder, alias_hits);
+            return 0;
+        }
     }
 
     STATS_INC(unwinder, alias_misses);

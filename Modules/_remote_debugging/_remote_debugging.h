@@ -264,7 +264,9 @@ typedef struct {
 
 #if defined(__APPLE__) && TARGET_OS_OSX
 #define MAX_ALIAS_PAGES 256
-#define ALIAS_PROBE_MASK 0x3ff
+#define ALIAS_PROBE_DEFAULT_MASK 0x3ff
+#define ALIAS_PROBE_MIN_MASK 0x3f
+#define ALIAS_PROBE_MAX_MASK 0x3fff
 
 typedef struct {
     uintptr_t remote_page_base;
@@ -272,6 +274,8 @@ typedef struct {
     mach_vm_size_t size;
     uint64_t access_seq;
     int valid;
+    uint64_t map_objid;
+    uint64_t map_offset;
     /* E1 instrumentation (only used when dbg_enabled) */
     uint64_t dbg_objid;       /* mutable: E1 dedup baseline (check_hit updates) */
     uint64_t dbg_offset;
@@ -298,13 +302,13 @@ typedef struct {
     mach_vm_address_t region_base;
     uint64_t access_seq;
     uint32_t probe_counter;
+    uint32_t probe_mask;
     int disabled;
     /* E1 instrumentation */
     int dbg_enabled;
     int dbg_force_deepwalk;        /* env: disable frame_cache full-hit to force deep alias walk */
     int dbg_no_datastack;          /* env: Option B (naive) - read datastack frames via read_overwrite, not alias */
     int dbg_chunkcopy_datastack;   /* env: Option B (proper) - bulk chunk-copy datastack in cache_frames mode; alias only interp/tstate */
-    int dbg_soft_remap_fail;       /* env: do not latch the alias off on a remap failure (measurement) */
     uint64_t dbg_checks;
     uint64_t dbg_recycle_events;
     /* E3 detection-power instrumentation (frame reads through stale alias) */
@@ -380,6 +384,8 @@ typedef struct {
     uint64_t alias_vfail_frame_parent;       // frame: previous != expected_parent
     uint64_t alias_evictions;                // macOS alias-cache LRU evictions
     uint64_t alias_identity_mismatches;      // macOS target identity mismatches
+    uint64_t alias_probe_checks;             // macOS alias object identity probes
+    uint64_t alias_probe_recycles;           // macOS alias recycled-page detections
 } UnwinderStats;
 
 #if defined(__GNUC__) || defined(__clang__)

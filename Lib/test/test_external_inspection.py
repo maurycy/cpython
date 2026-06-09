@@ -3786,6 +3786,8 @@ recurse({depth})
             "alias_validation_fails",
             "alias_evictions",
             "alias_identity_mismatches",
+            "alias_probe_checks",
+            "alias_probe_recycles",
             "batched_read_success_rate",
             "batched_read_segment_completion_rate",
         ]
