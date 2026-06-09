@@ -453,6 +453,8 @@ PyDoc_STRVAR(_remote_debugging_RemoteUnwinder_get_stats__doc__,
 "        - alias_evictions: macOS alias-cache LRU evictions\n"
 "        - alias_identity_mismatches: macOS target identity\n"
 "          mismatches\n"
+"        - alias_probe_checks: macOS alias object identity probes\n"
+"        - alias_probe_recycles: macOS alias recycled-page detections\n"
 "        - frame_cache_hit_rate: Percentage of samples that hit the\n"
 "          cache\n"
 "        - code_object_cache_hit_rate: Percentage of code object\n"
@@ -1719,4 +1721,4 @@ skip_optional_kwonly:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=da4742c66728d59d input=a9049054013a1b77]*/
+/*[clinic end generated code: output=170c53b2d66aed30 input=a9049054013a1b77]*/
