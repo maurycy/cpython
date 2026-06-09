@@ -257,30 +257,6 @@ remote_pointer_plausible(RemoteUnwinderObject *unwinder, uintptr_t ptr)
 }
 
 int
-_Py_RemoteDebug_ValidateInterpreterSnapshot(
-    RemoteUnwinderObject *unwinder,
-    const char *interp_state_buffer)
-{
-    uintptr_t threads_head = GET_MEMBER(uintptr_t, interp_state_buffer,
-        unwinder->debug_offsets.interpreter_state.threads_head);
-    uintptr_t threads_main = GET_MEMBER(uintptr_t, interp_state_buffer,
-        unwinder->debug_offsets.interpreter_state.threads_main);
-    uintptr_t next = GET_MEMBER(uintptr_t, interp_state_buffer,
-        unwinder->debug_offsets.interpreter_state.next);
-    uintptr_t gil_holder_tstate = GET_MEMBER(uintptr_t, interp_state_buffer,
-        unwinder->debug_offsets.interpreter_state.gil_runtime_state_holder);
-    uintptr_t gc_frame = GET_MEMBER(uintptr_t, interp_state_buffer,
-        unwinder->debug_offsets.interpreter_state.gc
-        + unwinder->debug_offsets.gc.frame);
-
-    return remote_pointer_plausible(unwinder, threads_head)
-        && remote_pointer_plausible(unwinder, threads_main)
-        && remote_pointer_plausible(unwinder, next)
-        && remote_pointer_plausible(unwinder, gil_holder_tstate)
-        && remote_pointer_plausible(unwinder, gc_frame);
-}
-
-int
 _Py_RemoteDebug_ValidateThreadStateSnapshot(
     RemoteUnwinderObject *unwinder,
     const char *tstate_buffer,

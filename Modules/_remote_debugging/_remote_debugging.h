@@ -687,10 +687,6 @@ extern int parse_frame_object_aliased(
     uintptr_t *previous_frame
 );
 
-extern int _Py_RemoteDebug_ValidateInterpreterSnapshot(
-    RemoteUnwinderObject *unwinder,
-    const char *interp_state_buffer
-);
 extern int _Py_RemoteDebug_ValidateThreadStateSnapshot(
     RemoteUnwinderObject *unwinder,
     const char *tstate_buffer,

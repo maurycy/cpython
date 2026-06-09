@@ -621,17 +621,6 @@ read_interp_state_and_maybe_thread_frame(
                 interp_state_buffer) < 0) {
             return -1;
         }
-        if (!_Py_RemoteDebug_ValidateInterpreterSnapshot(
-                unwinder, interp_state_buffer)) {
-            STATS_INC(unwinder, alias_validation_fails);
-            _Py_RemoteDebug_AliasCacheInvalidatePage(unwinder,
-                                                     interpreter_addr);
-            return _Py_RemoteDebug_ReadRemoteMemory(
-                &unwinder->handle,
-                interpreter_addr,
-                INTERP_STATE_BUFFER_SIZE,
-                interp_state_buffer);
-        }
         return 0;
     }
 #endif
