@@ -722,6 +722,15 @@ static PyObject *
 _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self)
 /*[clinic end generated code: output=666192b90c69d567 input=86a992b853f48aa9]*/
 {
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (self->collect_stats && self->stats.total_samples > 0) {
+        AliasReadCache *wsc = &self->alias_cache;
+        wsc->ws_hist[wsc->ws_count]++;
+        wsc->ws_samples++;
+        wsc->ws_count = 0;
+    }
+#endif
+
     STATS_INC(self, total_samples);
 
 #if defined(__APPLE__) && TARGET_OS_OSX
@@ -1255,6 +1264,45 @@ _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
     ADD_STAT(alias_identity_mismatches);
 
 #undef ADD_STAT
+
+#if defined(__APPLE__) && TARGET_OS_OSX
+    {
+        PyObject *hist = PyDict_New();
+        if (!hist) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        for (size_t i = 0; i <= ALIAS_WS_MAX; i++) {
+            if (self->alias_cache.ws_hist[i] == 0) {
+                continue;
+            }
+            PyObject *key = PyLong_FromSize_t(i);
+            PyObject *val = PyLong_FromUnsignedLongLong(
+                self->alias_cache.ws_hist[i]);
+            int rc = (key && val) ? PyDict_SetItem(hist, key, val) : -1;
+            Py_XDECREF(key);
+            Py_XDECREF(val);
+            if (rc < 0) {
+                Py_DECREF(hist);
+                Py_DECREF(result);
+                return NULL;
+            }
+        }
+        int rc = PyDict_SetItemString(result, "alias_ws_hist", hist);
+        Py_DECREF(hist);
+        if (rc < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+        PyObject *ovf = PyLong_FromUnsignedLong(self->alias_cache.ws_overflow);
+        rc = ovf ? PyDict_SetItemString(result, "alias_ws_overflow", ovf) : -1;
+        Py_XDECREF(ovf);
+        if (rc < 0) {
+            Py_DECREF(result);
+            return NULL;
+        }
+    }
+#endif
 
 #define ADD_DERIVED_STAT(name, value) do { \
     PyObject *val = PyFloat_FromDouble(value); \

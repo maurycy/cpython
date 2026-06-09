@@ -574,6 +574,23 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
             &unwinder->handle, remote_addr, len, dst);
     }
 
+    if (unwinder->collect_stats) {
+        uint32_t i;
+        for (i = 0; i < cache->ws_count; i++) {
+            if (cache->ws_pages[i] == page_base) {
+                break;
+            }
+        }
+        if (i == cache->ws_count) {
+            if (cache->ws_count < ALIAS_WS_MAX) {
+                cache->ws_pages[cache->ws_count++] = page_base;
+            }
+            else {
+                cache->ws_overflow++;
+            }
+        }
+    }
+
     AliasPageEntry *entry = alias_find_entry(unwinder, page_base);
     if (entry != NULL) {
         if (!alias_maybe_probe_identity(unwinder)) {

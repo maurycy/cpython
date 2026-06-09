@@ -340,6 +340,13 @@ typedef struct {
     uint64_t dbg_frecyc_in_notick;       /* stale frame reads in samples without a tick */
     uint64_t dbg_samples_recycle_tick;   /* samples with >=1 recycle event and a tick */
     uint64_t dbg_samples_recycle_notick; /* samples with >=1 recycle event, no tick */
+    /* working-set instrumentation: distinct pages looked up per sample */
+#define ALIAS_WS_MAX 512
+    uintptr_t ws_pages[ALIAS_WS_MAX];
+    uint32_t ws_count;
+    uint32_t ws_overflow;
+    uint64_t ws_hist[ALIAS_WS_MAX + 1];
+    uint64_t ws_samples;
 } AliasReadCache;
 #endif
 
