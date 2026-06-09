@@ -69,13 +69,14 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
 static int
 alias_identity_matches(RemoteUnwinderObject *unwinder)
 {
-    task_basic_info_data_t task_basic_info;
-    mach_msg_type_number_t task_info_count = TASK_BASIC_INFO_COUNT;
-    kern_return_t task_valid_check = task_info(unwinder->handle.task,
-                                               TASK_BASIC_INFO,
-                                               (task_info_t)&task_basic_info,
-                                               &task_info_count);
-    return task_valid_check == KERN_SUCCESS;
+    mach_port_type_t type = 0;
+    kern_return_t kr = mach_port_type(mach_task_self(),
+                                      unwinder->handle.task, &type);
+    if (kr != KERN_SUCCESS) {
+        return 0;
+    }
+    return ((type & MACH_PORT_TYPE_SEND) &&
+            !(type & MACH_PORT_TYPE_DEAD_NAME)) ? 1 : 0;
 }
 
 static int
