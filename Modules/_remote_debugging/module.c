@@ -412,9 +412,16 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
     task_vm_info_data_t vm_info;
     mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
     if (task_info(self->handle.task, TASK_VM_INFO,
-                  (task_info_t)&vm_info, &vm_count) == KERN_SUCCESS
-        && vm_info.max_address > vm_info.min_address) {
-        self->vm_max_address = (uintptr_t)vm_info.max_address;
+                  (task_info_t)&vm_info, &vm_count) == KERN_SUCCESS) {
+        if (vm_info.max_address > vm_info.min_address) {
+            self->vm_max_address = (uintptr_t)vm_info.max_address;
+        }
+        if (vm_info.page_size > 0
+            && (vm_info.page_size & (vm_info.page_size - 1)) == 0
+            && (size_t)vm_info.page_size != (size_t)self->handle.page_size) {
+            self->alias_cache.disabled = 1;
+            _Py_RemoteDebug_AliasCacheClear(self);
+        }
     }
 #endif
 
