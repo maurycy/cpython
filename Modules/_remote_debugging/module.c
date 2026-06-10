@@ -213,9 +213,16 @@ calculate_interp_state_window(RemoteUnwinderObject *self)
 {
     uint64_t start = UINT64_MAX;
     uint64_t end = 0;
-    _PyRemoteDebug_InterpStateWindow(&self->debug_offsets, &start, &end);
+    int zero_skipped =
+        _PyRemoteDebug_InterpStateWindow(&self->debug_offsets, &start, &end);
+#ifdef Py_GIL_DISABLED
+    const int expected_zero_offsets = 0;
+#else
+    const int expected_zero_offsets = 1;
+#endif
     start &= ~(uint64_t)7;
-    if (end > INTERP_STATE_BUFFER_SIZE || start >= end) {
+    if (zero_skipped != expected_zero_offsets
+        || end > INTERP_STATE_BUFFER_SIZE || start >= end) {
         self->interp_window_start = 0;
         self->interp_window_size = INTERP_STATE_BUFFER_SIZE;
         return;
