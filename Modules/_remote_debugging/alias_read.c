@@ -422,6 +422,8 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
     cache->dbg_chunkcopy_datastack = (getenv("ALIAS_CHUNK_DATASTACK") != NULL);
     cache->dbg_churn_enabled =
         (cache->dbg_enabled || getenv("ALIAS_CHURN_DEBUG") != NULL);
+    cache->reject_feedback = (getenv("ALIAS_REJECT_FEEDBACK") != NULL);
+    cache->probe_reject = (getenv("ALIAS_PROBE_REJECT") != NULL);
 }
 
 /* churn sensor: compare the live tstate->datastack_chunk pointer against the
@@ -642,6 +644,16 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
         if (probe < 0) {
             return _Py_RemoteDebug_ReadRemoteMemory(
                 &unwinder->handle, remote_addr, len, dst);
+        }
+        if (probe == 0 && cache->probe_reject) {
+            /* a detected recycle means earlier reads in this sample may
+             * already be frozen-stale: repairing the read mid-walk welds a
+             * live suffix onto a frozen prefix and defeats the base-frame
+             * anchor, so fail the whole sample instead. The entry is already
+             * invalidated; the next sample remaps fresh. */
+            PyErr_SetString(PyExc_RuntimeError,
+                            "alias page recycled under sample");
+            return -1;
         }
         if (probe > 0) {
             entry->access_seq = ++cache->access_seq;

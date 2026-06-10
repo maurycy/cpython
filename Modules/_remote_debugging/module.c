@@ -621,6 +621,7 @@ read_interp_state_and_maybe_thread_frame(
                 interp_state_buffer) < 0) {
             return -1;
         }
+        _Py_RemoteDebug_AliasShadowInterpAudit(unwinder, interp_state_buffer);
         return 0;
     }
 #endif
@@ -973,6 +974,12 @@ exit:
             }
         }
     }
+    if (self->alias_cache.reject_feedback && result == NULL) {
+        AliasReadCache *fb = &self->alias_cache;
+        if (fb->probe_mask > ALIAS_PROBE_MIN_MASK) {
+            fb->probe_mask >>= 1;
+        }
+    }
 #endif
     return result;
 }
@@ -1262,6 +1269,38 @@ _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
     ADD_STAT(alias_vfail_frame_executable);
     ADD_STAT(alias_vfail_frame_previous);
     ADD_STAT(alias_vfail_frame_parent);
+    ADD_STAT(shx_f_owner);
+    ADD_STAT(shx_f_owner_only);
+    ADD_STAT(shx_f_exec);
+    ADD_STAT(shx_f_exec_only);
+    ADD_STAT(shx_f_prev);
+    ADD_STAT(shx_f_prev_only);
+    ADD_STAT(shx_f_parent);
+    ADD_STAT(shx_f_parent_only);
+    ADD_STAT(shx_ts_interp);
+    ADD_STAT(shx_ts_interp_only);
+    ADD_STAT(shx_ts_selfloop);
+    ADD_STAT(shx_ts_selfloop_only);
+    ADD_STAT(shx_ts_curframe);
+    ADD_STAT(shx_ts_curframe_only);
+    ADD_STAT(shx_ts_baseframe);
+    ADD_STAT(shx_ts_baseframe_only);
+    ADD_STAT(shx_ts_next);
+    ADD_STAT(shx_ts_next_only);
+    ADD_STAT(shx_ts_lpf);
+    ADD_STAT(shx_ts_lpf_only);
+    ADD_STAT(shx_ts_calls);
+    ADD_STAT(shx_i_calls);
+    ADD_STAT(shx_i_thead);
+    ADD_STAT(shx_i_thead_only);
+    ADD_STAT(shx_i_tmain);
+    ADD_STAT(shx_i_tmain_only);
+    ADD_STAT(shx_i_next);
+    ADD_STAT(shx_i_next_only);
+    ADD_STAT(shx_i_gil);
+    ADD_STAT(shx_i_gil_only);
+    ADD_STAT(shx_i_gcframe);
+    ADD_STAT(shx_i_gcframe_only);
     ADD_STAT(alias_evictions);
     ADD_STAT(alias_identity_mismatches);
     ADD_STAT(alias_probe_checks);

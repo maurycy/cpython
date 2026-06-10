@@ -303,6 +303,8 @@ typedef struct {
     uint64_t access_seq;
     uint32_t probe_counter;
     uint32_t probe_mask;
+    int reject_feedback;   /* env ALIAS_REJECT_FEEDBACK: halve probe_mask on each rejected sample */
+    int probe_reject;      /* env ALIAS_PROBE_REJECT: a probe-detected recycle fails the sample instead of transparently remapping mid-walk */
     int disabled;
     /* E1 instrumentation */
     int dbg_enabled;
@@ -382,6 +384,41 @@ typedef struct {
     uint64_t alias_vfail_frame_executable;   // frame: implausible executable pointer
     uint64_t alias_vfail_frame_previous;     // frame: implausible previous pointer
     uint64_t alias_vfail_frame_parent;       // frame: previous != expected_parent
+    /* shadow audit: every validator arm evaluated independently of the live
+     * verdict; *_only = this arm failed while all sibling arms passed. */
+    uint64_t shx_f_owner;
+    uint64_t shx_f_owner_only;
+    uint64_t shx_f_exec;                     // removed from live verdict; shadow only
+    uint64_t shx_f_exec_only;
+    uint64_t shx_f_prev;
+    uint64_t shx_f_prev_only;
+    uint64_t shx_f_parent;
+    uint64_t shx_f_parent_only;
+    uint64_t shx_ts_interp;
+    uint64_t shx_ts_interp_only;
+    uint64_t shx_ts_selfloop;
+    uint64_t shx_ts_selfloop_only;
+    uint64_t shx_ts_curframe;
+    uint64_t shx_ts_curframe_only;
+    uint64_t shx_ts_baseframe;
+    uint64_t shx_ts_baseframe_only;
+    uint64_t shx_ts_next;
+    uint64_t shx_ts_next_only;
+    uint64_t shx_ts_lpf;
+    uint64_t shx_ts_lpf_only;
+    uint64_t shx_ts_calls;                   // ValidateThreadStateSnapshot invocations
+    /* shadow-only resurrection of ValidateInterpreterSnapshot (cfef8bcc792) */
+    uint64_t shx_i_calls;
+    uint64_t shx_i_thead;
+    uint64_t shx_i_thead_only;
+    uint64_t shx_i_tmain;
+    uint64_t shx_i_tmain_only;
+    uint64_t shx_i_next;
+    uint64_t shx_i_next_only;
+    uint64_t shx_i_gil;
+    uint64_t shx_i_gil_only;
+    uint64_t shx_i_gcframe;
+    uint64_t shx_i_gcframe_only;
     uint64_t alias_evictions;                // macOS alias-cache LRU evictions
     uint64_t alias_identity_mismatches;      // macOS target identity mismatches
     uint64_t alias_probe_checks;             // macOS alias object identity probes
@@ -784,6 +821,7 @@ extern void _Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwin
 extern void _Py_RemoteDebug_AliasDbgSetOwner(RemoteUnwinderObject *unwinder, uintptr_t remote_addr, int owner);
 extern void _Py_RemoteDebug_AliasDbgFrameCheck(RemoteUnwinderObject *unwinder, uintptr_t address, const char *frame_buf, uintptr_t expected_parent);
 extern void _Py_RemoteDebug_AliasDbgChurnCheck(RemoteUnwinderObject *unwinder, uintptr_t tstate_addr, uintptr_t chunk_ptr);
+extern void _Py_RemoteDebug_AliasShadowInterpAudit(RemoteUnwinderObject *unwinder, const char *interp_state_buffer);
 #endif
 
 /* ============================================================================

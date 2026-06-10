@@ -256,6 +256,56 @@ remote_pointer_plausible(RemoteUnwinderObject *unwinder, uintptr_t ptr)
     return 1;
 }
 
+/* shadow-only resurrection of the validator removed in cfef8bcc792: counts
+ * what it WOULD catch, affects nothing. */
+void
+_Py_RemoteDebug_AliasShadowInterpAudit(
+    RemoteUnwinderObject *unwinder,
+    const char *interp_state_buffer)
+{
+    STATS_INC(unwinder, shx_i_calls);
+    uintptr_t threads_head = GET_MEMBER(uintptr_t, interp_state_buffer,
+        unwinder->debug_offsets.interpreter_state.threads_head);
+    uintptr_t threads_main = GET_MEMBER(uintptr_t, interp_state_buffer,
+        unwinder->debug_offsets.interpreter_state.threads_main);
+    uintptr_t next = GET_MEMBER(uintptr_t, interp_state_buffer,
+        unwinder->debug_offsets.interpreter_state.next);
+    uintptr_t gil_holder_tstate = GET_MEMBER(uintptr_t, interp_state_buffer,
+        unwinder->debug_offsets.interpreter_state.gil_runtime_state_holder);
+    uintptr_t gc_frame = GET_MEMBER(uintptr_t, interp_state_buffer,
+        unwinder->debug_offsets.interpreter_state.gc
+        + unwinder->debug_offsets.gc.frame);
+
+    int ok_thead = remote_pointer_plausible(unwinder, threads_head);
+    int ok_tmain = remote_pointer_plausible(unwinder, threads_main);
+    int ok_next = remote_pointer_plausible(unwinder, next);
+    int ok_gil = remote_pointer_plausible(unwinder, gil_holder_tstate);
+    int ok_gcf = remote_pointer_plausible(unwinder, gc_frame);
+    int fails = !ok_thead + !ok_tmain + !ok_next + !ok_gil + !ok_gcf;
+    if (fails) {
+        if (!ok_thead) {
+            STATS_INC(unwinder, shx_i_thead);
+            if (fails == 1) STATS_INC(unwinder, shx_i_thead_only);
+        }
+        if (!ok_tmain) {
+            STATS_INC(unwinder, shx_i_tmain);
+            if (fails == 1) STATS_INC(unwinder, shx_i_tmain_only);
+        }
+        if (!ok_next) {
+            STATS_INC(unwinder, shx_i_next);
+            if (fails == 1) STATS_INC(unwinder, shx_i_next_only);
+        }
+        if (!ok_gil) {
+            STATS_INC(unwinder, shx_i_gil);
+            if (fails == 1) STATS_INC(unwinder, shx_i_gil_only);
+        }
+        if (!ok_gcf) {
+            STATS_INC(unwinder, shx_i_gcframe);
+            if (fails == 1) STATS_INC(unwinder, shx_i_gcframe_only);
+        }
+    }
+}
+
 int
 _Py_RemoteDebug_ValidateThreadStateSnapshot(
     RemoteUnwinderObject *unwinder,
@@ -263,12 +313,9 @@ _Py_RemoteDebug_ValidateThreadStateSnapshot(
     uintptr_t tstate_addr,
     uintptr_t current_interpreter)
 {
+    STATS_INC(unwinder, shx_ts_calls);
     uintptr_t interp = GET_MEMBER(uintptr_t, tstate_buffer,
         unwinder->debug_offsets.thread_state.interp);
-    if (interp != current_interpreter) {
-        return 0;
-    }
-
     uintptr_t current_frame = GET_MEMBER(uintptr_t, tstate_buffer,
         unwinder->debug_offsets.thread_state.current_frame);
     uintptr_t base_frame = GET_MEMBER(uintptr_t, tstate_buffer,
@@ -278,11 +325,46 @@ _Py_RemoteDebug_ValidateThreadStateSnapshot(
     uintptr_t last_profiled_frame = GET_MEMBER(uintptr_t, tstate_buffer,
         unwinder->debug_offsets.thread_state.last_profiled_frame);
 
-    return next != tstate_addr
-        && remote_pointer_plausible(unwinder, current_frame)
-        && remote_pointer_plausible(unwinder, base_frame)
-        && remote_pointer_plausible(unwinder, next)
-        && remote_pointer_plausible(unwinder, last_profiled_frame);
+    /* shadow audit: every arm evaluated independently; the live verdict is
+     * unchanged (the conjunction below). *_only counters attribute failures
+     * that no other arm would catch. */
+    int ok_interp = (interp == current_interpreter);
+    int ok_selfloop = (next != tstate_addr);
+    int ok_curframe = remote_pointer_plausible(unwinder, current_frame);
+    int ok_baseframe = remote_pointer_plausible(unwinder, base_frame);
+    int ok_next = remote_pointer_plausible(unwinder, next);
+    int ok_lpf = remote_pointer_plausible(unwinder, last_profiled_frame);
+    int fails = !ok_interp + !ok_selfloop + !ok_curframe + !ok_baseframe
+        + !ok_next + !ok_lpf;
+    if (fails) {
+        if (!ok_interp) {
+            STATS_INC(unwinder, shx_ts_interp);
+            if (fails == 1) STATS_INC(unwinder, shx_ts_interp_only);
+        }
+        if (!ok_selfloop) {
+            STATS_INC(unwinder, shx_ts_selfloop);
+            if (fails == 1) STATS_INC(unwinder, shx_ts_selfloop_only);
+        }
+        if (!ok_curframe) {
+            STATS_INC(unwinder, shx_ts_curframe);
+            if (fails == 1) STATS_INC(unwinder, shx_ts_curframe_only);
+        }
+        if (!ok_baseframe) {
+            STATS_INC(unwinder, shx_ts_baseframe);
+            if (fails == 1) STATS_INC(unwinder, shx_ts_baseframe_only);
+        }
+        if (!ok_next) {
+            STATS_INC(unwinder, shx_ts_next);
+            if (fails == 1) STATS_INC(unwinder, shx_ts_next_only);
+        }
+        if (!ok_lpf) {
+            STATS_INC(unwinder, shx_ts_lpf);
+            if (fails == 1) STATS_INC(unwinder, shx_ts_lpf_only);
+        }
+    }
+
+    return ok_interp && ok_selfloop && ok_curframe && ok_baseframe
+        && ok_next && ok_lpf;
 }
 
 static int
@@ -293,18 +375,49 @@ validate_frame_snapshot(
 {
     int owner = (unsigned char)GET_MEMBER(char, frame,
         unwinder->debug_offsets.interpreter_frame.owner);
-    if (owner < FRAME_OWNED_BY_THREAD || owner > FRAME_OWNED_BY_INTERPRETER) {
+    uintptr_t previous = GET_MEMBER(uintptr_t, frame,
+        unwinder->debug_offsets.interpreter_frame.previous);
+    uintptr_t executable = GET_MEMBER_NO_TAG(uintptr_t, frame,
+        unwinder->debug_offsets.interpreter_frame.executable);
+
+    /* shadow audit: all arms evaluated independently. The executable arm is
+     * removed from the live verdict (never the first failing predicate
+     * across 47M+ hits) and kept here ONLY as a shadow counter to validate
+     * that removal at scale. *_only = no other arm would have caught it. */
+    int ok_owner = (owner >= FRAME_OWNED_BY_THREAD
+                    && owner <= FRAME_OWNED_BY_INTERPRETER);
+    int ok_exec = remote_pointer_plausible(unwinder, executable);
+    int ok_prev = remote_pointer_plausible(unwinder, previous);
+    int ok_parent = (expected_parent == 0 || previous == expected_parent);
+    int fails = !ok_owner + !ok_exec + !ok_prev + !ok_parent;
+    if (fails) {
+        if (!ok_owner) {
+            STATS_INC(unwinder, shx_f_owner);
+            if (fails == 1) STATS_INC(unwinder, shx_f_owner_only);
+        }
+        if (!ok_exec) {
+            STATS_INC(unwinder, shx_f_exec);
+            if (fails == 1) STATS_INC(unwinder, shx_f_exec_only);
+        }
+        if (!ok_prev) {
+            STATS_INC(unwinder, shx_f_prev);
+            if (fails == 1) STATS_INC(unwinder, shx_f_prev_only);
+        }
+        if (!ok_parent) {
+            STATS_INC(unwinder, shx_f_parent);
+            if (fails == 1) STATS_INC(unwinder, shx_f_parent_only);
+        }
+    }
+
+    if (!ok_owner) {
         STATS_INC(unwinder, alias_vfail_frame_owner);
         return 0;
     }
-
-    uintptr_t previous = GET_MEMBER(uintptr_t, frame,
-        unwinder->debug_offsets.interpreter_frame.previous);
-    if (!remote_pointer_plausible(unwinder, previous)) {
+    if (!ok_prev) {
         STATS_INC(unwinder, alias_vfail_frame_previous);
         return 0;
     }
-    if (expected_parent != 0 && previous != expected_parent) {
+    if (!ok_parent) {
         STATS_INC(unwinder, alias_vfail_frame_parent);
         return 0;
     }
