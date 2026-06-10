@@ -661,7 +661,7 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
             return _Py_RemoteDebug_ReadRemoteMemory(
                 &unwinder->handle, remote_addr, len, dst);
         }
-        if (probe == 0 && cache->probe_reject) {
+        if (probe == 0) {
             /* a detected recycle means earlier reads in this sample may
              * already be frozen-stale: repairing the read mid-walk welds a
              * live suffix onto a frozen prefix and defeats the base-frame

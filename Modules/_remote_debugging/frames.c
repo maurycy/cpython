@@ -460,7 +460,6 @@ parse_frame_object_aliased(
     if (!validate_frame_snapshot(unwinder, frame, expected_parent)) {
         STATS_INC(unwinder, alias_validation_fails);
         STATS_INC(unwinder, alias_vfail_frame);
-        _Py_RemoteDebug_AliasCacheInvalidatePage(unwinder, address);
         return parse_frame_object(unwinder, result, address,
                                   address_of_code_object, previous_frame);
     }
