@@ -788,6 +788,7 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
         char prefetched_tstate[SIZEOF_THREAD_STATE];
         char prefetched_frame[SIZEOF_INTERP_FRAME];
         RemoteReadPrefetch prefetch = {0};
+#if !(defined(__APPLE__) && TARGET_OS_OSX)
         if (self->cache_frames) {
             prefetch.tstate_addr = get_cached_tstate_for_interpreter(
                 self, current_interpreter);
@@ -798,6 +799,7 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
                 prefetch.frame_addr = entry->addrs[0];
             }
         }
+#endif
 
         if (read_interp_state_and_maybe_thread_frame(
                 self,
