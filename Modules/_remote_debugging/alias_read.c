@@ -15,7 +15,7 @@ alias_query_region(task_t task,
     mach_vm_address_t region_addr = addr;
     mach_vm_size_t region_size = 0;
     natural_t depth = 0;
-    vm_region_submap_info_data_64_t info;
+    vm_region_submap_info_data_64_t info = {0};
     mach_msg_type_number_t count = VM_REGION_SUBMAP_INFO_COUNT_64;
 
     kern_return_t kr = mach_vm_region_recurse(
@@ -233,11 +233,13 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
             STATS_INC(unwinder, alias_identity_mismatches);
             alias_disable_runtime(unwinder);
         }
+        else if (kr == KERN_NOT_SUPPORTED) {
+            alias_disable_runtime(unwinder);
+        }
         return -1;
     }
 
     entry->remote_page_base = page_base;
-    entry->size = (mach_vm_size_t)unwinder->handle.page_size;
     entry->access_seq = ++cache->access_seq;
     entry->valid = 1;
 
