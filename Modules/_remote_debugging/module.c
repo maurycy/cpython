@@ -211,30 +211,9 @@ is_prerelease_version(uint64_t version)
 static void
 calculate_interp_state_window(RemoteUnwinderObject *self)
 {
-    const struct _Py_DebugOffsets *off = &self->debug_offsets;
-    const struct { uint64_t offset; size_t size; } fields[] = {
-        {off->interpreter_state.id, sizeof(int64_t)},
-        {off->interpreter_state.next, sizeof(uintptr_t)},
-        {off->interpreter_state.threads_head, sizeof(uintptr_t)},
-        {off->interpreter_state.threads_main, sizeof(uintptr_t)},
-        {off->interpreter_state.gil_runtime_state_locked, sizeof(int)},
-        {off->interpreter_state.gil_runtime_state_holder, sizeof(uintptr_t)},
-        {off->interpreter_state.code_object_generation, sizeof(uint64_t)},
-#ifdef Py_GIL_DISABLED
-        {off->interpreter_state.tlbc_generation, sizeof(uint32_t)},
-#endif
-        {off->interpreter_state.gc + off->gc.frame, sizeof(uintptr_t)},
-    };
     uint64_t start = UINT64_MAX;
     uint64_t end = 0;
-    for (size_t i = 0; i < Py_ARRAY_LENGTH(fields); i++) {
-        if (fields[i].offset < start) {
-            start = fields[i].offset;
-        }
-        if (fields[i].offset + fields[i].size > end) {
-            end = fields[i].offset + fields[i].size;
-        }
-    }
+    _PyRemoteDebug_InterpStateWindow(&self->debug_offsets, &start, &end);
     start &= ~(uint64_t)7;
     if (end > INTERP_STATE_BUFFER_SIZE || start >= end) {
         self->interp_window_start = 0;
