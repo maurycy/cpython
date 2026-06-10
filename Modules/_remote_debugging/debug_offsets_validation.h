@@ -476,16 +476,20 @@ _PyRemoteDebug_ValidateAsyncDebugOffsets(
     return 0;
 }
 
-static inline void
+static inline int
 _PyRemoteDebug_InterpStateWindow(const struct _Py_DebugOffsets *off,
                                  uint64_t *start_out, uint64_t *end_out)
 {
     uint64_t start = UINT64_MAX;
     uint64_t end = 0;
+    int zero_skipped = 0;
 #define PY_REMOTE_DEBUG_WINDOW_FIELD(section, field, field_size, align, buffer_size) \
     do { \
         uint64_t field_off = off->section.field; \
-        if (field_off != 0) { \
+        if (field_off == 0) { \
+            zero_skipped++; \
+        } \
+        else { \
             if (field_off < start) { \
                 start = field_off; \
             } \
@@ -497,7 +501,10 @@ _PyRemoteDebug_InterpStateWindow(const struct _Py_DebugOffsets *off,
     PY_REMOTE_DEBUG_INTERPRETER_STATE_FIELDS(PY_REMOTE_DEBUG_WINDOW_FIELD, 0);
 #undef PY_REMOTE_DEBUG_WINDOW_FIELD
     uint64_t gc_frame_off = off->interpreter_state.gc + off->gc.frame;
-    if (gc_frame_off != 0) {
+    if (gc_frame_off == 0) {
+        zero_skipped++;
+    }
+    else {
         if (gc_frame_off < start) {
             start = gc_frame_off;
         }
@@ -507,6 +514,7 @@ _PyRemoteDebug_InterpStateWindow(const struct _Py_DebugOffsets *off,
     }
     *start_out = start;
     *end_out = end;
+    return zero_skipped;
 }
 
 #undef PY_REMOTE_DEBUG_VALIDATE_SECTION
