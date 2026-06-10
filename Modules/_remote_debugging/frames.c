@@ -290,7 +290,8 @@ validate_frame_snapshot(
 {
     int owner = (unsigned char)GET_MEMBER(char, frame,
         unwinder->debug_offsets.interpreter_frame.owner);
-    if (owner < FRAME_OWNED_BY_THREAD || owner > FRAME_OWNED_BY_INTERPRETER) {
+    if (owner < FRAME_OWNED_BY_THREAD || owner > FRAME_OWNED_BY_INTERPRETER
+            || owner == FRAME_OWNED_BY_FRAME_OBJECT) {
         return 0;
     }
 
@@ -305,7 +306,7 @@ validate_frame_snapshot(
     return 1;
 }
 
-int
+static int
 parse_frame_object_aliased(
     RemoteUnwinderObject *unwinder,
     uintptr_t expected_parent,

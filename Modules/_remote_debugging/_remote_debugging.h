@@ -271,7 +271,6 @@ typedef struct {
 typedef struct {
     uintptr_t remote_page_base;
     mach_vm_address_t local_page_base;
-    mach_vm_size_t size;
     uint64_t access_seq;
     int valid;
     uint64_t map_objid;
@@ -689,14 +688,6 @@ extern int collect_frames_with_cache(
     uint64_t thread_id);
 
 #if defined(__APPLE__) && TARGET_OS_OSX
-extern int parse_frame_object_aliased(
-    RemoteUnwinderObject *unwinder,
-    uintptr_t expected_parent,
-    PyObject **result,
-    uintptr_t address,
-    uintptr_t *address_of_code_object,
-    uintptr_t *previous_frame
-);
 
 extern int _Py_RemoteDebug_ValidateThreadStateSnapshot(
     RemoteUnwinderObject *unwinder,
