@@ -238,6 +238,9 @@ remote_pointer_plausible(RemoteUnwinderObject *unwinder, uintptr_t ptr)
     if (ptr < (uintptr_t)unwinder->handle.page_size) {
         return 0;
     }
+    if (unwinder->vm_max_address != 0) {
+        return ptr < unwinder->vm_max_address;
+    }
 #if UINTPTR_MAX > 0xffffffffU
 #  if defined(__x86_64__)
     if (ptr >= (1ULL << 47)) {
