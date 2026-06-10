@@ -383,6 +383,8 @@ typedef struct {
     proc_handle_t handle;
     uintptr_t runtime_start_address;
     struct _Py_DebugOffsets debug_offsets;
+    size_t interp_window_start;
+    size_t interp_window_size;
     int async_debug_offsets_available;
     struct _Py_AsyncioModuleDebugOffsets async_debug_offsets;
     uintptr_t interpreter_addr;
