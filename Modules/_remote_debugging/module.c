@@ -211,32 +211,18 @@ is_prerelease_version(uint64_t version)
 static void
 calculate_interp_state_window(RemoteUnwinderObject *self)
 {
-    const struct _Py_DebugOffsets *off = &self->debug_offsets;
-    const struct { uint64_t offset; size_t size; } fields[] = {
-        {off->interpreter_state.id, sizeof(int64_t)},
-        {off->interpreter_state.next, sizeof(uintptr_t)},
-        {off->interpreter_state.threads_head, sizeof(uintptr_t)},
-        {off->interpreter_state.threads_main, sizeof(uintptr_t)},
-        {off->interpreter_state.gil_runtime_state_locked, sizeof(int)},
-        {off->interpreter_state.gil_runtime_state_holder, sizeof(uintptr_t)},
-        {off->interpreter_state.code_object_generation, sizeof(uint64_t)},
-#ifdef Py_GIL_DISABLED
-        {off->interpreter_state.tlbc_generation, sizeof(uint32_t)},
-#endif
-        {off->interpreter_state.gc + off->gc.frame, sizeof(uintptr_t)},
-    };
     uint64_t start = UINT64_MAX;
     uint64_t end = 0;
-    for (size_t i = 0; i < Py_ARRAY_LENGTH(fields); i++) {
-        if (fields[i].offset < start) {
-            start = fields[i].offset;
-        }
-        if (fields[i].offset + fields[i].size > end) {
-            end = fields[i].offset + fields[i].size;
-        }
-    }
+    int zero_skipped =
+        _PyRemoteDebug_InterpStateWindow(&self->debug_offsets, &start, &end);
+#ifdef Py_GIL_DISABLED
+    const int expected_zero_offsets = 0;
+#else
+    const int expected_zero_offsets = 1;
+#endif
     start &= ~(uint64_t)7;
-    if (end > INTERP_STATE_BUFFER_SIZE || start >= end) {
+    if (zero_skipped != expected_zero_offsets
+        || end > INTERP_STATE_BUFFER_SIZE || start >= end) {
         self->interp_window_start = 0;
         self->interp_window_size = INTERP_STATE_BUFFER_SIZE;
         return;
@@ -426,9 +412,16 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
     task_vm_info_data_t vm_info;
     mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
     if (task_info(self->handle.task, TASK_VM_INFO,
-                  (task_info_t)&vm_info, &vm_count) == KERN_SUCCESS
-        && vm_info.max_address > vm_info.min_address) {
-        self->vm_max_address = (uintptr_t)vm_info.max_address;
+                  (task_info_t)&vm_info, &vm_count) == KERN_SUCCESS) {
+        if (vm_info.max_address > vm_info.min_address) {
+            self->vm_max_address = (uintptr_t)vm_info.max_address;
+        }
+        if (vm_info.page_size > 0
+            && (vm_info.page_size & (vm_info.page_size - 1)) == 0
+            && (size_t)vm_info.page_size != (size_t)self->handle.page_size) {
+            self->alias_cache.disabled = 1;
+            _Py_RemoteDebug_AliasCacheClear(self);
+        }
     }
 #endif
 
@@ -544,6 +537,7 @@ interpreter_thread_cache_index(uintptr_t interpreter_addr)
         & (INTERPRETER_THREAD_CACHE_SIZE - 1);
 }
 
+#if !(defined(__APPLE__) && TARGET_OS_OSX)
 static inline uintptr_t
 get_cached_tstate_for_interpreter(
     RemoteUnwinderObject *self,
@@ -566,6 +560,7 @@ get_cached_tstate_for_interpreter(
     }
     return 0;
 }
+#endif
 
 static inline void
 set_cached_tstate_for_interpreter(
@@ -809,6 +804,7 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
         char prefetched_tstate[SIZEOF_THREAD_STATE];
         char prefetched_frame[SIZEOF_INTERP_FRAME];
         RemoteReadPrefetch prefetch = {0};
+#if !(defined(__APPLE__) && TARGET_OS_OSX)
         if (self->cache_frames) {
             prefetch.tstate_addr = get_cached_tstate_for_interpreter(
                 self, current_interpreter);
@@ -819,6 +815,7 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
                 prefetch.frame_addr = entry->addrs[0];
             }
         }
+#endif
 
         if (read_interp_state_and_maybe_thread_frame(
                 self,
