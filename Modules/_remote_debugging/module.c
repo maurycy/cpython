@@ -420,8 +420,16 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
         set_exception_cause(self, PyExc_RuntimeError, "Failed to initialize process handle");
         return -1;
     }
+    self->vm_max_address = 0;
 #if defined(__APPLE__) && TARGET_OS_OSX
     _Py_RemoteDebug_AliasCacheInit(self);
+    task_vm_info_data_t vm_info;
+    mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
+    if (task_info(self->handle.task, TASK_VM_INFO,
+                  (task_info_t)&vm_info, &vm_count) == KERN_SUCCESS
+        && vm_info.max_address > vm_info.min_address) {
+        self->vm_max_address = (uintptr_t)vm_info.max_address;
+    }
 #endif
 
     self->runtime_start_address = _Py_RemoteDebug_GetPyRuntimeAddress(&self->handle);
