@@ -385,6 +385,7 @@ typedef struct {
     struct _Py_DebugOffsets debug_offsets;
     size_t interp_window_start;
     size_t interp_window_size;
+    uintptr_t vm_max_address;
     int async_debug_offsets_available;
     struct _Py_AsyncioModuleDebugOffsets async_debug_offsets;
     uintptr_t interpreter_addr;
