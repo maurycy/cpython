@@ -137,8 +137,7 @@ alias_maybe_probe_entry(RemoteUnwinderObject *unwinder,
                                 entry->remote_page_base,
                                 &objid, &offset);
     if (rc < 0) {
-        STATS_INC(unwinder, alias_identity_mismatches);
-        alias_disable_runtime(unwinder);
+        alias_invalidate_entry(entry);
         return -1;
     }
     if (rc == 0 && objid == entry->map_objid &&
