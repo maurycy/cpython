@@ -523,6 +523,7 @@ interpreter_thread_cache_index(uintptr_t interpreter_addr)
         & (INTERPRETER_THREAD_CACHE_SIZE - 1);
 }
 
+#if !(defined(__APPLE__) && TARGET_OS_OSX)
 static inline uintptr_t
 get_cached_tstate_for_interpreter(
     RemoteUnwinderObject *self,
@@ -545,6 +546,7 @@ get_cached_tstate_for_interpreter(
     }
     return 0;
 }
+#endif
 
 static inline void
 set_cached_tstate_for_interpreter(
