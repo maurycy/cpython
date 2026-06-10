@@ -301,6 +301,20 @@ void
 _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
+    if (cache->dbg_churn_enabled) {
+        int used = 0;
+        int max_idx = -1;
+        for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
+            if (cache->pages[i].valid) {
+                used++;
+                max_idx = i;
+            }
+        }
+        if (used) {
+            fprintf(stderr, "[aliasdbg] OCCUPANCY used=%d max_idx=%d\n",
+                    used, max_idx);
+        }
+    }
     if (cache->dbg_enabled) {
         fprintf(stderr,
             "[aliasdbg] SUMMARY checks=%llu recycle_events=%llu\n",
