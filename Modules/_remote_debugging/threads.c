@@ -314,7 +314,6 @@ read_thread_state_and_maybe_frame(
                 unwinder, tstate_buffer, tstate_addr,
                 current_interpreter)) {
             STATS_INC(unwinder, alias_validation_fails);
-            _Py_RemoteDebug_AliasCacheInvalidatePage(unwinder, tstate_addr);
             return _Py_RemoteDebug_ReadRemoteMemory(
                 &unwinder->handle, tstate_addr, tstate_size, tstate_buffer);
         }
