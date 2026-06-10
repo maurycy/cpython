@@ -285,6 +285,11 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
             return _Py_RemoteDebug_ReadRemoteMemory(
                 &unwinder->handle, remote_addr, len, dst);
         }
+        if (probe == 0) {
+            PyErr_SetString(PyExc_RuntimeError,
+                            "alias page recycled under sample");
+            return -1;
+        }
         if (probe > 0) {
             entry->access_seq = ++cache->access_seq;
             memcpy(dst, (const char *)entry->local_page_base + offset, len);
