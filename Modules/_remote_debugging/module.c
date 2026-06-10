@@ -208,6 +208,43 @@ is_prerelease_version(uint64_t version)
     return (version & 0xF0) != 0xF0;
 }
 
+static void
+calculate_interp_state_window(RemoteUnwinderObject *self)
+{
+    const struct _Py_DebugOffsets *off = &self->debug_offsets;
+    const struct { uint64_t offset; size_t size; } fields[] = {
+        {off->interpreter_state.id, sizeof(int64_t)},
+        {off->interpreter_state.next, sizeof(uintptr_t)},
+        {off->interpreter_state.threads_head, sizeof(uintptr_t)},
+        {off->interpreter_state.threads_main, sizeof(uintptr_t)},
+        {off->interpreter_state.gil_runtime_state_locked, sizeof(int)},
+        {off->interpreter_state.gil_runtime_state_holder, sizeof(uintptr_t)},
+        {off->interpreter_state.code_object_generation, sizeof(uint64_t)},
+#ifdef Py_GIL_DISABLED
+        {off->interpreter_state.tlbc_generation, sizeof(uint32_t)},
+#endif
+        {off->interpreter_state.gc + off->gc.frame, sizeof(uintptr_t)},
+    };
+    uint64_t start = UINT64_MAX;
+    uint64_t end = 0;
+    for (size_t i = 0; i < Py_ARRAY_LENGTH(fields); i++) {
+        if (fields[i].offset < start) {
+            start = fields[i].offset;
+        }
+        if (fields[i].offset + fields[i].size > end) {
+            end = fields[i].offset + fields[i].size;
+        }
+    }
+    start &= ~(uint64_t)7;
+    if (end > INTERP_STATE_BUFFER_SIZE || start >= end) {
+        self->interp_window_start = 0;
+        self->interp_window_size = INTERP_STATE_BUFFER_SIZE;
+        return;
+    }
+    self->interp_window_start = (size_t)start;
+    self->interp_window_size = (size_t)(end - start);
+}
+
 int
 validate_debug_offsets(struct _Py_DebugOffsets *debug_offsets)
 {
@@ -383,8 +420,16 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
         set_exception_cause(self, PyExc_RuntimeError, "Failed to initialize process handle");
         return -1;
     }
+    self->vm_max_address = 0;
 #if defined(__APPLE__) && TARGET_OS_OSX
     _Py_RemoteDebug_AliasCacheInit(self);
+    task_vm_info_data_t vm_info;
+    mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
+    if (task_info(self->handle.task, TASK_VM_INFO,
+                  (task_info_t)&vm_info, &vm_count) == KERN_SUCCESS
+        && vm_info.max_address > vm_info.min_address) {
+        self->vm_max_address = (uintptr_t)vm_info.max_address;
+    }
 #endif
 
     self->runtime_start_address = _Py_RemoteDebug_GetPyRuntimeAddress(&self->handle);
@@ -406,6 +451,8 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
         set_exception_cause(self, PyExc_RuntimeError, "Invalid debug offsets found");
         return -1;
     }
+
+    calculate_interp_state_window(self);
 
     // Try to read async debug offsets, but don't fail if they're not available
     self->async_debug_offsets_available = 1;
@@ -590,9 +637,9 @@ refresh_generation_caches_for_interpreter(
     char interp_state_buffer[INTERP_STATE_BUFFER_SIZE];
     if (_Py_RemoteDebug_ReadRemoteMemory(
             &self->handle,
-            interpreter_addr,
-            INTERP_STATE_BUFFER_SIZE,
-            interp_state_buffer) < 0) {
+            interpreter_addr + self->interp_window_start,
+            self->interp_window_size,
+            interp_state_buffer + self->interp_window_start) < 0) {
         set_exception_cause(self, PyExc_RuntimeError,
                             "Failed to read interpreter state buffer");
         return -1;
@@ -612,13 +659,15 @@ read_interp_state_and_maybe_thread_frame(
 {
     prefetch->tstate = NULL;
     prefetch->frame = NULL;
+    size_t iw_start = unwinder->interp_window_start;
+    size_t iw_size = unwinder->interp_window_size;
 #if defined(__APPLE__) && TARGET_OS_OSX
     if (unwinder->cache_frames) {
         if (_Py_RemoteDebug_AliasedRead(
                 unwinder,
-                interpreter_addr,
-                INTERP_STATE_BUFFER_SIZE,
-                interp_state_buffer) < 0) {
+                interpreter_addr + iw_start,
+                iw_size,
+                interp_state_buffer + iw_start) < 0) {
             return -1;
         }
         _Py_RemoteDebug_AliasShadowInterpAudit(unwinder, interp_state_buffer);
@@ -628,7 +677,8 @@ read_interp_state_and_maybe_thread_frame(
     if (prefetch->tstate_addr != 0) {
         size_t tstate_size = (size_t)unwinder->debug_offsets.thread_state.size;
         _Py_RemoteReadSegment segments[3] = {
-            {interpreter_addr, interp_state_buffer, INTERP_STATE_BUFFER_SIZE},
+            {interpreter_addr + iw_start, interp_state_buffer + iw_start,
+             iw_size},
             {prefetch->tstate_addr, tstate_buffer, tstate_size},
             {prefetch->frame_addr, frame_buffer, SIZEOF_INTERP_FRAME},
         };
@@ -636,9 +686,9 @@ read_interp_state_and_maybe_thread_frame(
         Py_ssize_t nread = _Py_RemoteDebug_BatchedReadRemoteMemory(
             &unwinder->handle, segments, nsegs);
         int completed = 0;
-        if (nread >= (Py_ssize_t)INTERP_STATE_BUFFER_SIZE) {
+        if (nread >= (Py_ssize_t)iw_size) {
             completed = 1;
-            Py_ssize_t with_tstate = (Py_ssize_t)INTERP_STATE_BUFFER_SIZE
+            Py_ssize_t with_tstate = (Py_ssize_t)iw_size
                 + (Py_ssize_t)tstate_size;
             if (nread >= with_tstate) {
                 completed = 2;
@@ -661,9 +711,9 @@ read_interp_state_and_maybe_thread_frame(
     }
     return _Py_RemoteDebug_ReadRemoteMemory(
         &unwinder->handle,
-        interpreter_addr,
-        INTERP_STATE_BUFFER_SIZE,
-        interp_state_buffer);
+        interpreter_addr + iw_start,
+        iw_size,
+        interp_state_buffer + iw_start);
 }
 
 /*[clinic input]

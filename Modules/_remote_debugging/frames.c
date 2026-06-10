@@ -238,6 +238,9 @@ remote_pointer_plausible(RemoteUnwinderObject *unwinder, uintptr_t ptr)
     if (ptr < (uintptr_t)unwinder->handle.page_size) {
         return 0;
     }
+    if (unwinder->vm_max_address != 0) {
+        return ptr < unwinder->vm_max_address;
+    }
 #if UINTPTR_MAX > 0xffffffffU
 #  if defined(__x86_64__)
     if (ptr >= (1ULL << 47)) {
@@ -318,16 +321,16 @@ _Py_RemoteDebug_ValidateThreadStateSnapshot(
         unwinder->debug_offsets.thread_state.interp);
     uintptr_t current_frame = GET_MEMBER(uintptr_t, tstate_buffer,
         unwinder->debug_offsets.thread_state.current_frame);
-    uintptr_t base_frame = GET_MEMBER(uintptr_t, tstate_buffer,
-        unwinder->debug_offsets.thread_state.base_frame);
     uintptr_t next = GET_MEMBER(uintptr_t, tstate_buffer,
         unwinder->debug_offsets.thread_state.next);
+    uintptr_t base_frame = GET_MEMBER(uintptr_t, tstate_buffer,
+        unwinder->debug_offsets.thread_state.base_frame);
     uintptr_t last_profiled_frame = GET_MEMBER(uintptr_t, tstate_buffer,
         unwinder->debug_offsets.thread_state.last_profiled_frame);
 
-    /* shadow audit: every arm evaluated independently; the live verdict is
-     * unchanged (the conjunction below). *_only counters attribute failures
-     * that no other arm would catch. */
+    /* shadow audit: every arm evaluated independently. The lpf and
+     * base_frame arms are removed from the live verdict (0 unique catches
+     * across ~800M calls) and stay here as shadow counters only. */
     int ok_interp = (interp == current_interpreter);
     int ok_selfloop = (next != tstate_addr);
     int ok_curframe = remote_pointer_plausible(unwinder, current_frame);
@@ -363,8 +366,7 @@ _Py_RemoteDebug_ValidateThreadStateSnapshot(
         }
     }
 
-    return ok_interp && ok_selfloop && ok_curframe && ok_baseframe
-        && ok_next && ok_lpf;
+    return ok_interp && ok_selfloop && ok_curframe && ok_next;
 }
 
 static int
@@ -385,7 +387,8 @@ validate_frame_snapshot(
      * across 47M+ hits) and kept here ONLY as a shadow counter to validate
      * that removal at scale. *_only = no other arm would have caught it. */
     int ok_owner = (owner >= FRAME_OWNED_BY_THREAD
-                    && owner <= FRAME_OWNED_BY_INTERPRETER);
+                    && owner <= FRAME_OWNED_BY_INTERPRETER
+                    && owner != FRAME_OWNED_BY_FRAME_OBJECT);
     int ok_exec = remote_pointer_plausible(unwinder, executable);
     int ok_prev = remote_pointer_plausible(unwinder, previous);
     int ok_parent = (expected_parent == 0 || previous == expected_parent);
@@ -424,7 +427,7 @@ validate_frame_snapshot(
     return 1;
 }
 
-int
+static int
 parse_frame_object_aliased(
     RemoteUnwinderObject *unwinder,
     uintptr_t expected_parent,
