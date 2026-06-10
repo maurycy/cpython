@@ -228,11 +228,8 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
     if (kr != KERN_SUCCESS) {
         alias_invalidate_entry(entry);
         STATS_INC(unwinder, alias_remap_failures);
-        if (kr == MACH_SEND_INVALID_DEST || kr == KERN_INVALID_ARGUMENT) {
-            STATS_INC(unwinder, alias_identity_mismatches);
-            alias_disable_runtime(unwinder);
-        }
-        else if (kr == KERN_NOT_SUPPORTED) {
+        if (kr == MACH_SEND_INVALID_DEST || kr == KERN_TERMINATED
+                || kr == KERN_NOT_SUPPORTED) {
             alias_disable_runtime(unwinder);
         }
         return -1;
