@@ -271,18 +271,12 @@ _Py_RemoteDebug_ValidateThreadStateSnapshot(
 
     uintptr_t current_frame = GET_MEMBER(uintptr_t, tstate_buffer,
         unwinder->debug_offsets.thread_state.current_frame);
-    uintptr_t base_frame = GET_MEMBER(uintptr_t, tstate_buffer,
-        unwinder->debug_offsets.thread_state.base_frame);
     uintptr_t next = GET_MEMBER(uintptr_t, tstate_buffer,
         unwinder->debug_offsets.thread_state.next);
-    uintptr_t last_profiled_frame = GET_MEMBER(uintptr_t, tstate_buffer,
-        unwinder->debug_offsets.thread_state.last_profiled_frame);
 
     return next != tstate_addr
         && remote_pointer_plausible(unwinder, current_frame)
-        && remote_pointer_plausible(unwinder, base_frame)
-        && remote_pointer_plausible(unwinder, next)
-        && remote_pointer_plausible(unwinder, last_profiled_frame);
+        && remote_pointer_plausible(unwinder, next);
 }
 
 static int
