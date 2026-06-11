@@ -81,18 +81,6 @@ alias_disable_runtime(RemoteUnwinderObject *unwinder)
 }
 
 void
-_Py_RemoteDebug_AliasCacheInvalidatePage(RemoteUnwinderObject *unwinder,
-                                         uintptr_t remote_addr)
-{
-    size_t page_size = (size_t)unwinder->handle.page_size;
-    uintptr_t page_base = remote_addr & ~(uintptr_t)(page_size - 1);
-    AliasPageEntry *entry;
-    while ((entry = alias_find_entry(unwinder, page_base)) != NULL) {
-        alias_invalidate_entry(entry);
-    }
-}
-
-void
 _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
 {
     AliasReadCache *cache = &unwinder->alias_cache;
