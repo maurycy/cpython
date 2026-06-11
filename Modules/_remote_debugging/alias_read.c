@@ -259,27 +259,36 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
 {
     AliasReadCache *cache = &unwinder->alias_cache;
     if (len == 0) {
-        return 0;
+        return 1;
     }
     if (cache->disabled) {
-        return _Py_RemoteDebug_ReadRemoteMemory(
-            &unwinder->handle, remote_addr, len, dst);
+        if (_Py_RemoteDebug_ReadRemoteMemory(
+                &unwinder->handle, remote_addr, len, dst) < 0) {
+            return -1;
+        }
+        return 1;
     }
 
     size_t page_size = (size_t)unwinder->handle.page_size;
     uintptr_t page_base = remote_addr & ~(uintptr_t)(page_size - 1);
     size_t offset = (size_t)(remote_addr - page_base);
     if (offset >= page_size || len > page_size - offset) {
-        return _Py_RemoteDebug_ReadRemoteMemory(
-            &unwinder->handle, remote_addr, len, dst);
+        if (_Py_RemoteDebug_ReadRemoteMemory(
+                &unwinder->handle, remote_addr, len, dst) < 0) {
+            return -1;
+        }
+        return 1;
     }
 
     AliasPageEntry *entry = alias_find_entry(unwinder, page_base);
     if (entry != NULL) {
         int probe = alias_maybe_probe_entry(unwinder, entry);
         if (probe < 0) {
-            return _Py_RemoteDebug_ReadRemoteMemory(
-                &unwinder->handle, remote_addr, len, dst);
+            if (_Py_RemoteDebug_ReadRemoteMemory(
+                    &unwinder->handle, remote_addr, len, dst) < 0) {
+                return -1;
+            }
+            return 1;
         }
         if (probe == 0) {
             PyErr_SetString(PyExc_RuntimeError,
@@ -296,8 +305,11 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
 
     STATS_INC(unwinder, alias_misses);
     if (alias_remap_page(unwinder, page_base, &entry) < 0) {
-        return _Py_RemoteDebug_ReadRemoteMemory(
-            &unwinder->handle, remote_addr, len, dst);
+        if (_Py_RemoteDebug_ReadRemoteMemory(
+                &unwinder->handle, remote_addr, len, dst) < 0) {
+            return -1;
+        }
+        return 1;
     }
     memcpy(dst, (const char *)entry->local_page_base + offset, len);
     return 0;
