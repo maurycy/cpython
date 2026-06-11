@@ -1183,8 +1183,6 @@ Returns:
         - alias_validation_fails: macOS alias snapshot validation
           failures
         - alias_evictions: macOS alias-cache LRU evictions
-        - alias_identity_mismatches: macOS target identity
-          mismatches
         - alias_probe_checks: macOS alias object identity probes
         - alias_probe_recycles: macOS alias recycled-page detections
         - frame_cache_hit_rate: Percentage of samples that hit the
@@ -1202,7 +1200,7 @@ Raises:
 
 static PyObject *
 _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
-/*[clinic end generated code: output=21e36477122be2a0 input=d9bce4858ca7cbc7]*/
+/*[clinic end generated code: output=21e36477122be2a0 input=913e10ed7cabd40d]*/
 {
     if (!self->collect_stats) {
         PyErr_SetString(PyExc_RuntimeError,
@@ -1247,7 +1245,6 @@ _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
     ADD_STAT(alias_remap_failures);
     ADD_STAT(alias_validation_fails);
     ADD_STAT(alias_evictions);
-    ADD_STAT(alias_identity_mismatches);
     ADD_STAT(alias_probe_checks);
     ADD_STAT(alias_probe_recycles);
 

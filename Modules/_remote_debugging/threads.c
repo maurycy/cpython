@@ -303,14 +303,15 @@ read_thread_state_and_maybe_frame(
     *frame_read = 0;
 #if defined(__APPLE__) && TARGET_OS_OSX
     if (unwinder->cache_frames) {
-        if (_Py_RemoteDebug_AliasedRead(
-                unwinder,
-                tstate_addr,
-                tstate_size,
-                tstate_buffer) < 0) {
+        int rc = _Py_RemoteDebug_AliasedRead(
+            unwinder,
+            tstate_addr,
+            tstate_size,
+            tstate_buffer);
+        if (rc < 0) {
             return -1;
         }
-        if (!_Py_RemoteDebug_ValidateThreadStateSnapshot(
+        if (rc == 0 && !_Py_RemoteDebug_ValidateThreadStateSnapshot(
                 unwinder, tstate_buffer, tstate_addr,
                 current_interpreter)) {
             STATS_INC(unwinder, alias_validation_fails);

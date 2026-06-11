@@ -316,22 +316,22 @@ parse_frame_object_aliased(
     uintptr_t *previous_frame)
 {
     char frame[SIZEOF_INTERP_FRAME];
-    if (_Py_RemoteDebug_AliasedRead(
-            unwinder, address, SIZEOF_INTERP_FRAME,
-            frame) < 0) {
+    int rc = _Py_RemoteDebug_AliasedRead(
+        unwinder, address, SIZEOF_INTERP_FRAME, frame);
+    if (rc < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError,
                             "Failed to read interpreter frame");
         return -1;
     }
-    STATS_INC(unwinder, memory_reads);
-    STATS_ADD(unwinder, memory_bytes_read, SIZEOF_INTERP_FRAME);
 
-    if (!validate_frame_snapshot(unwinder, frame, expected_parent)) {
+    if (rc == 0 && !validate_frame_snapshot(unwinder, frame, expected_parent)) {
         STATS_INC(unwinder, alias_validation_fails);
         return parse_frame_object(unwinder, result, address,
                                   address_of_code_object, previous_frame);
     }
 
+    STATS_INC(unwinder, memory_reads);
+    STATS_ADD(unwinder, memory_bytes_read, SIZEOF_INTERP_FRAME);
     return parse_frame_buffer(unwinder, result, frame,
                               address_of_code_object, previous_frame);
 }

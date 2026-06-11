@@ -310,7 +310,6 @@ typedef struct {
     uint64_t alias_remap_failures;           // macOS remap/protect failures
     uint64_t alias_validation_fails;         // macOS alias snapshot validation failures
     uint64_t alias_evictions;                // macOS alias-cache LRU evictions
-    uint64_t alias_identity_mismatches;      // macOS target identity mismatches
     uint64_t alias_probe_checks;             // macOS alias object identity probes
     uint64_t alias_probe_recycles;           // macOS alias recycled-page detections
 } UnwinderStats;
@@ -695,6 +694,10 @@ extern int _Py_RemoteDebug_ValidateThreadStateSnapshot(
     uintptr_t tstate_addr,
     uintptr_t current_interpreter
 );
+/* Returns 0 if bytes were served from an aliased page snapshot (callers
+ * should validate), 1 if no snapshot was involved (live syscall read or
+ * zero-length no-op; skip validation), -1 on error with an exception
+ * set. */
 extern int _Py_RemoteDebug_AliasedRead(
     RemoteUnwinderObject *unwinder,
     uintptr_t remote_addr,
