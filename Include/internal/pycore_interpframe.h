@@ -298,9 +298,12 @@ _PyThreadState_GetFrame(PyThreadState *tstate)
     do { \
         PyThreadState *tstate_ = (tstate); \
         _PyInterpreterFrame *frame_ = (frame); \
-        if (tstate_->last_profiled_frame == frame_) { \
-            tstate_->last_profiled_frame = (previous); \
+        _PyInterpreterFrame *last_profiled_frame_ = tstate_->last_profiled_frame; \
+        if (last_profiled_frame_ != NULL) { \
             tstate_->last_profiled_frame_seq++; \
+            if (last_profiled_frame_ == frame_) { \
+                tstate_->last_profiled_frame = (previous); \
+            } \
         } \
     } while (0)
 
