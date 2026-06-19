@@ -629,6 +629,10 @@ extern FrameCacheEntry *frame_cache_find(RemoteUnwinderObject *unwinder, uint64_
 extern FrameCacheEntry *frame_cache_find_by_tstate(RemoteUnwinderObject *unwinder, uintptr_t tstate_addr);
 extern int clear_last_profiled_frames(RemoteUnwinderObject *unwinder);
 extern int set_last_profiled_frame(RemoteUnwinderObject *unwinder, uintptr_t tstate_addr, uintptr_t frame_addr);
+extern int read_last_profiled_anchor(
+    RemoteUnwinderObject *unwinder,
+    uintptr_t thread_state_addr,
+    FrameCacheAnchor *anchor);
 extern void frame_cache_invalidate_stale(RemoteUnwinderObject *unwinder, PyObject *result);
 extern int frame_cache_lookup_and_extend(
     RemoteUnwinderObject *unwinder,
