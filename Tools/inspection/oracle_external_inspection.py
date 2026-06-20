@@ -21,6 +21,53 @@ MODES = {
     "blocking-nocache": (True, False),
 }
 
+FLAT_ALTERNATING_CODE = """\
+def leaf_a(): return sum(range(50))
+def leaf_b(): return sum(range(50))
+def hot_a(): return leaf_a()
+def hot_b(): return leaf_b()
+while True:
+    hot_a(); hot_b()
+"""
+
+
+def _expected_lines(code):
+    expected = {}
+    for number, line in enumerate(code.splitlines(), 1):
+        stripped = line.strip()
+        if stripped.startswith("def "):
+            expected[stripped[4:].split("(")[0].strip()] = number
+    return expected
+
+
+FLAT_ALTERNATING_LINES = _expected_lines(FLAT_ALTERNATING_CODE)
+
+
+def classify_flat(frames):
+    present = {}
+    for frame in frames:
+        if frame.funcname in FLAT_ALTERNATING_LINES:
+            present[frame.funcname] = getattr(
+                getattr(frame, "location", None), "lineno", -1
+            )
+    if not present:
+        return False
+    for name, lineno in present.items():
+        if lineno != FLAT_ALTERNATING_LINES[name]:
+            return True
+    hot_a, hot_b = "hot_a" in present, "hot_b" in present
+    leaf_a, leaf_b = "leaf_a" in present, "leaf_b" in present
+    if leaf_a and hot_b:
+        return True
+    if leaf_b and hot_a:
+        return True
+    if hot_a and hot_b:
+        return True
+    if (leaf_a or leaf_b) and not (hot_a or hot_b):
+        return True
+    return False
+
+
 DEEP_ALTERNATING_CODE = """\
 def burn_a():
     total = 0
@@ -135,9 +182,71 @@ def classify_shared(frames):
     return False
 
 
+GEN_ALTERNATING_CODE = """\
+def agen(n):
+    total = 0
+    for i in range(n):
+        total += i
+        yield i
+
+def bgen(n):
+    total = 0
+    for i in range(n):
+        total += i
+        yield i
+
+def drv_a():
+    for _ in agen(60):
+        pass
+
+def drv_b():
+    for _ in bgen(60):
+        pass
+
+while True:
+    drv_a()
+    drv_b()
+"""
+
+
+def classify_gen(frames):
+    names = {frame.funcname for frame in frames}
+    if "agen" in names and "drv_b" in names:
+        return True
+    if "bgen" in names and "drv_a" in names:
+        return True
+    return False
+
+
+DEEP_RECURSION_CODE = """\
+def leaf():
+    total = 0
+    for i in range(40):
+        total += i
+
+def a(n):
+    return a(n - 1) if n else leaf()
+
+def b(n):
+    return b(n - 1) if n else leaf()
+
+while True:
+    a(300)
+    b(300)
+"""
+
+
+def classify_recursion(frames):
+    names = {frame.funcname for frame in frames}
+    return "a" in names and "b" in names
+
+
 CASES = {
+    "flat_alternating": (FLAT_ALTERNATING_CODE, classify_flat),
     "deep_alternating": (DEEP_ALTERNATING_CODE, classify_deep),
     "shared_leaf": (SHARED_LEAF_CODE, classify_shared),
+    "gen_alternating": (GEN_ALTERNATING_CODE, classify_gen),
+    "deep_recursion": (DEEP_RECURSION_CODE, classify_recursion),
 }
 
 
