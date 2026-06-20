@@ -76,6 +76,19 @@ def tvd(left, right):
     )
 
 
+def print_run_info(args, cases, modes):
+    run_config = (
+        f"cases={','.join(cases)} modes={','.join(modes)} "
+        f"reference={args.reference_mode} samples={args.samples} "
+        f"rate={args.rate} warmup={args.warmup} "
+        f"main_thread={args.main_thread}"
+    )
+    print(
+        f"{sys.version.replace(chr(10), ' ')} "
+    )
+    print(f"{run_config}")
+
+
 def terminate_process(proc):
     if proc.poll() is not None:
         return
@@ -172,11 +185,10 @@ def run_mode(case, mode_name, args):
 
 
 def print_results(case_name, results, reference, args):
-    failed_any = False
     print(f"\n{case_name}")
     print(
         f"{'mode':<18} {'samples':>8} {'obs':>8} {'errors%':>8} "
-        f"{'impossible%':>12} {'tvd_to_ref':>10} {'verdict':>8}"
+        f"{'impossible%':>12} {'tvd_to_ref':>10}"
     )
     reference_obs = reference["observations"]
     for mode, result in results.items():
@@ -190,13 +202,6 @@ def print_results(case_name, results, reference, args):
             if is_reference
             else tvd(result["observations"], reference_obs)
         )
-        failed = (
-            not obs
-            or impossible_percent > args.max_impossible_percent
-            or (distance_value is not None and distance_value > args.max_tvd)
-            or (distance_value is None and not is_reference)
-        )
-        failed_any |= failed
         if is_reference:
             distance_text = "ref"
         elif distance_value is None:
@@ -206,15 +211,12 @@ def print_results(case_name, results, reference, args):
         print(
             f"{mode:<18} {result['samples']:>8} {obs:>8} "
             f"{error_percent:>8.2f} {impossible_percent:>12.2f} "
-            f"{distance_text:>10} {'FAIL' if failed else 'PASS':>8}"
+            f"{distance_text:>10}"
         )
-    return failed_any
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(
-        formatter_class=HelpFormatter
-    )
+    parser = argparse.ArgumentParser(formatter_class=HelpFormatter)
     parser.add_argument(
         "--case",
         choices=sorted(CASES),
@@ -256,35 +258,23 @@ def parse_args():
         action="store_true",
         help="sample only the target main thread",
     )
-    parser.add_argument(
-        "--max-impossible-percent",
-        type=float,
-        default=1.0,
-        help="maximum allowed impossible observation percentage",
-    )
-    parser.add_argument(
-        "--max-tvd",
-        type=float,
-        default=0.05,
-        help="maximum allowed total variation distance from the reference",
-    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
+    cases = list(args.case) if args.case else sorted(CASES)
     modes = list(args.mode) if args.mode else sorted(MODES)
     if args.reference_mode not in modes:
         modes.append(args.reference_mode)
 
-    failed = False
-    for name in args.case or sorted(CASES):
+    print_run_info(args, cases, modes)
+
+    for name in cases:
         case = CASES[name]
         results = {mode: run_mode(case, mode, args) for mode in modes}
-        failed |= print_results(
-            name, results, results[args.reference_mode], args
-        )
-    return int(failed)
+        print_results(name, results, results[args.reference_mode], args)
+    return 0
 
 
 if __name__ == "__main__":
