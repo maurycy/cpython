@@ -379,7 +379,7 @@ def parse_args():
     parser.add_argument(
         "--rate-khz",
         type=float,
-        default=1.0,
+        default=100.0,
         help="target sampling rate in kHz; 0 samples as fast as possible",
     )
     parser.add_argument(
