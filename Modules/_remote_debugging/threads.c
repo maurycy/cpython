@@ -337,14 +337,12 @@ unwind_stack_for_thread(
     PyObject *thread_id = NULL;
     PyObject *result = NULL;
     StackChunkList chunks = {0};
-    uintptr_t thread_state_addr = *current_tstate;
-    uintptr_t next_tstate = 0;
 
     char local_ts[SIZEOF_THREAD_STATE];
     char local_prefetched_frame[SIZEOF_INTERP_FRAME];
     const char *ts;
     RemoteReadPrefetch ctx_prefetch = {0};
-    if (prefetch->tstate && prefetch->tstate_addr == thread_state_addr) {
+    if (prefetch->tstate && prefetch->tstate_addr == *current_tstate) {
         ts = prefetch->tstate;
         if (prefetch->frame) {
             ctx_prefetch.frame = prefetch->frame;
@@ -354,14 +352,14 @@ unwind_stack_for_thread(
     else if (unwinder->cache_frames) {
         uintptr_t predicted_frame_addr = 0;
         int have_prefetched_frame = 0;
-        FrameCacheEntry *entry = frame_cache_find_by_tstate(unwinder, thread_state_addr);
+        FrameCacheEntry *entry = frame_cache_find_by_tstate(unwinder, *current_tstate);
         if (entry && entry->num_addrs > 0) {
             predicted_frame_addr = entry->addrs[0];
         }
 
         int rc = read_thread_state_and_maybe_frame(
             unwinder,
-            thread_state_addr,
+            *current_tstate,
             (size_t)unwinder->debug_offsets.thread_state.size,
             local_ts,
             predicted_frame_addr,
@@ -380,7 +378,7 @@ unwind_stack_for_thread(
     else {
         int rc = _Py_RemoteDebug_ReadRemoteMemory(
             &unwinder->handle,
-            thread_state_addr,
+            *current_tstate,
             (size_t)unwinder->debug_offsets.thread_state.size,
             local_ts);
         if (rc < 0) {
@@ -498,24 +496,7 @@ unwind_stack_for_thread(
 
     uintptr_t frame_addr = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.current_frame);
     uintptr_t base_frame_addr = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.base_frame);
-    next_tstate = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.next);
-    FrameCacheAnchor pop_epoch = {
-        .frame = GET_MEMBER(uintptr_t, ts,
-            unwinder->debug_offsets.thread_state.last_profiled_frame),
-        .seq = GET_MEMBER(uintptr_t, ts,
-            unwinder->debug_offsets.thread_state.last_profiled_frame_seq),
-    };
 
-    if (pop_epoch.frame == 0 && frame_addr != 0) {
-        if (set_last_profiled_frame(unwinder, thread_state_addr, frame_addr) < 0) {
-            PyErr_Clear();
-        }
-        *current_tstate = next_tstate;
-        return NULL;
-    }
-
-    int pop_epoch_retries = 0;
-retry_pop_epoch:
     frame_info = PyList_New(0);
     if (!frame_info) {
         set_exception_cause(unwinder, PyExc_MemoryError, "Failed to create frame info list");
@@ -525,7 +506,7 @@ retry_pop_epoch:
     // Cache mode skips this for full hits, but cache misses copy chunks before
     // walking so newly stored cache entries come from a stable stack snapshot.
     if (!unwinder->cache_frames) {
-        if (copy_stack_chunks(unwinder, thread_state_addr, &chunks) < 0) {
+        if (copy_stack_chunks(unwinder, *current_tstate, &chunks) < 0) {
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to copy stack chunks");
             goto error;
         }
@@ -534,7 +515,7 @@ retry_pop_epoch:
     uintptr_t addrs[FRAME_CACHE_MAX_FRAMES];
     FrameWalkContext ctx = {
         .frame_addr = frame_addr,
-        .thread_state_addr = thread_state_addr,
+        .thread_state_addr = *current_tstate,
         .base_frame_addr = base_frame_addr,
         .gc_frame = gc_frame,
         .chunks = &chunks,
@@ -547,10 +528,20 @@ retry_pop_epoch:
     assert(ctx.max_addrs == FRAME_CACHE_MAX_FRAMES);
 
     if (unwinder->cache_frames) {
-        ctx.last_profiled = pop_epoch;
+        // Use cache to avoid re-reading unchanged parent frames
+        ctx.last_profiled.frame = GET_MEMBER(uintptr_t, ts,
+            unwinder->debug_offsets.thread_state.last_profiled_frame);
+        ctx.last_profiled.seq = GET_MEMBER(uintptr_t, ts,
+            unwinder->debug_offsets.thread_state.last_profiled_frame_seq);
         if (collect_frames_with_cache(unwinder, &ctx, tid) < 0) {
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to collect frames");
             goto error;
+        }
+        // Update last_profiled_frame for next sample if it changed
+        if (frame_addr != ctx.last_profiled.frame) {
+            if (set_last_profiled_frame(unwinder, *current_tstate, frame_addr) < 0) {
+                PyErr_Clear();  // Non-fatal
+            }
         }
     } else {
         // No caching - process entire frame chain with base_frame validation
@@ -560,47 +551,7 @@ retry_pop_epoch:
         }
     }
 
-    FrameCacheAnchor live_pop_epoch;
-    if (read_last_profiled_anchor(unwinder, thread_state_addr, &live_pop_epoch) < 0) {
-        set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to validate pop epoch");
-        goto error;
-    }
-    if (live_pop_epoch.seq != pop_epoch.seq) {
-        // Torn read: a frame popped mid-walk; retry up to twice, then drop.
-        Py_CLEAR(frame_info);
-        cleanup_stack_chunks(&chunks);
-        chunks = (StackChunkList){0};
-        if (pop_epoch_retries++ < 2 &&
-            _Py_RemoteDebug_ReadRemoteMemory(&unwinder->handle, thread_state_addr,
-                (size_t)unwinder->debug_offsets.thread_state.size, local_ts) == 0) {
-            ts = local_ts;
-            ctx_prefetch = (RemoteReadPrefetch){0};
-            frame_addr = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.current_frame);
-            base_frame_addr = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.base_frame);
-            pop_epoch.frame = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.last_profiled_frame);
-            pop_epoch.seq = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.last_profiled_frame_seq);
-            goto retry_pop_epoch;
-        }
-        *current_tstate = next_tstate;
-        return NULL;
-    }
-
-    if (unwinder->cache_frames) {
-        if (ctx.last_frame_visited != 0 &&
-            frame_cache_store(unwinder, tid, frame_info, addrs, ctx.num_addrs,
-                              thread_state_addr, pop_epoch.seq, base_frame_addr,
-                              ctx.last_frame_visited) < 0) {
-            set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to store frame cache");
-            goto error;
-        }
-        if (frame_addr != pop_epoch.frame) {
-            if (set_last_profiled_frame(unwinder, thread_state_addr, frame_addr) < 0) {
-                PyErr_Clear();  // Non-fatal
-            }
-        }
-    }
-
-    *current_tstate = next_tstate;
+    *current_tstate = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.next);
 
     if (unwinder->cache_frames) {
         FrameCacheEntry *entry = frame_cache_find(unwinder, (uint64_t)tid);
