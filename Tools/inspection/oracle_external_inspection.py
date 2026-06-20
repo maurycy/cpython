@@ -20,7 +20,7 @@ MODES = {
     "blocking-nocache": (True, False),
 }
 
-FLAT_ALTERNATING_CODE = """\
+DEEP_ALTERNATING_CODE = """\
 def burn_a():
     total = 0
     for i in range(20000):
@@ -51,34 +51,39 @@ while True:
 """
 
 
-def classify_flat(frames):
-    names = {f.funcname for f in frames}
-    out = []
-    if "burn_a" in names or "a_leaf" in names:
-        out.append(
-            ("impossible:b_parent/a", "a stack under b_parent")
-            if "b_parent" in names
-            else ("a_parent/a", None)
-        )
-    if "burn_b" in names or "b_leaf" in names:
-        out.append(
-            ("impossible:a_parent/b", "b stack under a_parent")
-            if "a_parent" in names
-            else ("b_parent/b", None)
-        )
-    return out or ([(f"top:{frames[0].funcname}", None)] if frames else [])
-
-
-CASES = {
-    "flat_alternating": (FLAT_ALTERNATING_CODE, classify_flat),
+DEEP_ALTERNATING_BRANCHES = {
+    "a": ["a_parent", "a_leaf", "burn_a"],
+    "b": ["b_parent", "b_leaf", "burn_b"],
 }
 
 
-class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
-    def _get_help_string(self, action):
-        if action.default is None:
-            return action.help
-        return super()._get_help_string(action)
+def classify_deep(frames):
+    names = {frame.funcname for frame in frames}
+    present = [
+        family
+        for family, chain in DEEP_ALTERNATING_BRANCHES.items()
+        if names.intersection(chain)
+    ]
+    if len(present) > 1:
+        return [("impossible:cross:a/b", "a-branch and b-branch in one stack")]
+    if not present:
+        return [(f"top:{frames[0].funcname}", None)] if frames else []
+    chain = DEEP_ALTERNATING_BRANCHES[present[0]]
+    depth = max(chain.index(name) for name in chain if name in names)
+    missing = [chain[i] for i in range(depth) if chain[i] not in names]
+    if missing:
+        return [
+            (
+                f"impossible:torn:{present[0]}",
+                f"{chain[depth]} without ancestors {','.join(missing)}",
+            )
+        ]
+    return [(f"{present[0]}:{chain[depth]}", None)]
+
+
+CASES = {
+    "deep_alternating": (DEEP_ALTERNATING_CODE, classify_deep),
+}
 
 
 def tvd(left, right):
@@ -88,12 +93,6 @@ def tvd(left, right):
     return 0.5 * sum(
         abs(left[k] / lt - right[k] / rt) for k in set(left) | set(right)
     )
-
-
-def ci95(values):
-    if len(values) < 2:
-        return None
-    return 1.96 * statistics.stdev(values) / len(values) ** 0.5
 
 
 def print_run_info(args, cases, modes):
@@ -210,62 +209,35 @@ def result_metrics(result, reference_obs, is_reference):
     obs = sum(result["observations"].values())
     impossible = sum(result["impossible"].values())
     return {
-        "attempts": result["attempts"],
         "samples": result["samples"],
-        "errors": result["errors"],
         "obs": obs,
-        "impossible": impossible,
         "error_percent": 100.0 * result["errors"] / result["attempts"],
         "impossible_percent": 100.0 * impossible / obs if obs else 0.0,
         "tvd": None if is_reference else tvd(result["observations"], reference_obs),
     }
 
 
-def format_tvd(value):
-    return "n/a" if value is None else f"{value:.3f}"
-
-
-def format_metric(value, precision):
+def fmt(value, precision):
     return "n/a" if value is None else f"{value:.{precision}f}"
 
 
 def metric_summary(values, precision):
+    stdev = None
+    if len(values) > 1:
+        stdev = statistics.stdev(values)
     return (
-        format_metric(statistics.mean(values), precision),
-        format_metric(ci95(values), precision),
-        format_metric(min(values), precision),
-        format_metric(max(values), precision),
+        fmt(statistics.mean(values), precision),
+        fmt(stdev, precision),
+        fmt(min(values), precision),
+        fmt(max(values), precision),
     )
 
 
-def print_results(case_name, results, reference, args):
-    print(f"\n{case_name}")
-    print(
-        f"{'mode':<18} {'samples':>8} {'obs':>8} {'errors%':>8} "
-        f"{'impossible%':>12} {'tvd_to_ref':>10}"
-    )
-    reference_obs = reference["observations"]
-    for mode, result in results.items():
-        is_reference = result is reference
-        metrics = result_metrics(result, reference_obs, is_reference)
-        if is_reference:
-            distance_text = "ref"
-        else:
-            distance_text = format_tvd(metrics["tvd"])
-        print(
-            f"{mode:<18} {metrics['samples']:>8} {metrics['obs']:>8} "
-            f"{metrics['error_percent']:>8.2f} "
-            f"{metrics['impossible_percent']:>12.2f} "
-            f"{distance_text:>10}"
-        )
-
-
-def print_aggregate_results(case_name, run_results, modes, reference_mode, args):
+def print_results(case_name, run_results, modes, reference_mode):
     print(f"\n{case_name}")
     print(
         f"{'metric':<12} {'mode':<18} {'runs':>4} {'samples':>8} "
-        f"{'obs':>8} {'mean':>8} {'ci95':>8} "
-        f"{'min':>8} {'max':>8}"
+        f"{'obs':>8} {'mean':>8} {'stdev':>8} {'min':>8} {'max':>8}"
     )
     metrics_by_mode = {
         mode: [
@@ -290,20 +262,22 @@ def print_aggregate_results(case_name, run_results, modes, reference_mode, args)
             samples = sum(item["samples"] for item in metrics)
             obs = sum(item["obs"] for item in metrics)
             if key == "tvd" and mode == reference_mode:
-                mean = ci = min_value = max_value = "ref"
+                mean = stdev = min_value = max_value = "ref"
             else:
-                mean, ci, min_value, max_value = metric_summary(
+                mean, stdev, min_value, max_value = metric_summary(
                     [item[key] for item in metrics], precision
                 )
             print(
                 f"{metric_name:<12} {mode:<18} {len(metrics):>4} "
-                f"{samples:>8} {obs:>8} {mean:>8} "
-                f"{ci:>8} {min_value:>8} {max_value:>8}"
+                f"{samples:>8} {obs:>8} {mean:>8} {stdev:>8} "
+                f"{min_value:>8} {max_value:>8}"
             )
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(formatter_class=HelpFormatter)
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
     parser.add_argument(
         "--case",
         choices=sorted(CASES),
@@ -373,19 +347,11 @@ def main():
 
     for name in cases:
         case = CASES[name]
-        run_results = []
-        for run in range(1, args.runs + 1):
-            results = {}
-            for mode in modes:
-                results[mode] = run_mode(case, mode, args)
-            run_results.append(results)
-        if args.runs == 1:
-            results = run_results[0]
-            print_results(name, results, results[args.reference_mode], args)
-        else:
-            print_aggregate_results(
-                name, run_results, modes, args.reference_mode, args
-            )
+        run_results = [
+            {mode: run_mode(case, mode, args) for mode in modes}
+            for _ in range(args.runs)
+        ]
+        print_results(name, run_results, modes, args.reference_mode)
     return 0
 
 
