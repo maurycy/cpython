@@ -67,29 +67,19 @@ def classify_deep(frames):
         if names.intersection(chain)
     ]
     if len(present) > 1:
-        return [("impossible:cross:a/b", "a-branch and b-branch in one stack")]
+        return True
     if not present:
-        return [(f"top:{frames[0].funcname}", None)] if frames else []
+        return False
     chain = DEEP_ALTERNATING_BRANCHES[present[0]]
     depth = max(chain.index(name) for name in chain if name in names)
     missing = [chain[i] for i in range(depth) if chain[i] not in names]
     if missing:
-        return [
-            (
-                f"impossible:torn:{present[0]}",
-                f"{chain[depth]} without ancestors {','.join(missing)}",
-            )
-        ]
+        return True
     stack_order = [name for name in reversed(chain[: depth + 1])]
     indices = [frame_names.index(name) for name in stack_order]
     if indices != sorted(indices):
-        return [
-            (
-                f"impossible:order:{present[0]}",
-                f"expected {'/'.join(stack_order)} in leaf-to-root order",
-            )
-        ]
-    return [(f"{present[0]}:{chain[depth]}", None)]
+        return True
+    return False
 
 
 SHARED_LEAF_CODE = """\
@@ -130,23 +120,19 @@ def classify_shared(frames):
     frame_names = [frame.funcname for frame in frames]
     names = set(frame_names)
     if "a_wrapper" in names and "b_wrapper" in names:
-        return [("impossible:cross:a/b", "a_wrapper and b_wrapper in one stack")]
+        return True
     if "shared_leaf" not in names:
-        return [(f"top:{frames[0].funcname}", None)] if frames else []
+        return False
     index = frame_names.index("shared_leaf")
     parent = frame_names[index + 1] if index + 1 < len(frame_names) else None
     if parent not in ("a_wrapper", "b_wrapper"):
-        return [("impossible:orphan", f"shared_leaf under {parent}")]
+        return True
     lineno = getattr(getattr(frames[index], "location", None), "lineno", -1)
     if lineno in SHARED_LEAF_LONG_LINES:
-        if parent != "b_wrapper":
-            return [("impossible:parent-line", f"long branch under {parent}")]
-        return [("b:shared_leaf:long", None)]
+        return parent != "b_wrapper"
     if lineno in SHARED_LEAF_SHORT_LINES:
-        if parent != "a_wrapper":
-            return [("impossible:parent-line", f"short branch under {parent}")]
-        return [("a:shared_leaf:short", None)]
-    return [(f"{parent}:shared_leaf:boundary", None)]
+        return parent != "a_wrapper"
+    return False
 
 
 CASES = {
@@ -162,6 +148,16 @@ def tvd(left, right):
     return 0.5 * sum(
         abs(left[k] / lt - right[k] / rt) for k in set(left) | set(right)
     )
+
+
+def stack_key(frames, target_filename):
+    parts = []
+    for frame in frames:
+        location = getattr(frame, "location", None)
+        if getattr(location, "filename", None) != target_filename:
+            continue
+        parts.append(f"{frame.funcname}:{getattr(location, 'lineno', None)}")
+    return ";".join(parts) if parts else "no-target-frame"
 
 
 def print_run_info(args, cases, modes):
@@ -206,7 +202,7 @@ def target_process(code, warmup):
                 f"target exited unexpectedly\n"
                 f"stdout:\n{out.decode()}\nstderr:\n{err.decode()}"
             )
-        yield proc
+        yield proc, tmp_name
     finally:
         with contextlib.suppress(Exception):
             if proc is not None:
@@ -233,9 +229,9 @@ def run_mode(case, mode_name, args):
         "samples": 0,
         "errors": 0,
         "observations": Counter(),
-        "impossible": Counter(),
+        "impossible": 0,
     }
-    with target_process(code, args.warmup) as proc:
+    with target_process(code, args.warmup) as (proc, target_filename):
         unwinder = _remote_debugging.RemoteUnwinder(
             proc.pid,
             all_threads=True,
@@ -270,10 +266,12 @@ def run_mode(case, mode_name, args):
             result["samples"] += 1
             for interp in trace:
                 for thread in interp.threads:
-                    for category, reason in classify(thread.frame_info):
-                        result["observations"][category] += 1
-                        if reason is not None:
-                            result["impossible"][reason] += 1
+                    if classify(thread.frame_info):
+                        result["impossible"] += 1
+                    else:
+                        result["observations"][
+                            stack_key(thread.frame_info, target_filename)
+                        ] += 1
             if deadline is None and result["attempts"] >= args.samples:
                 break
     return result
@@ -281,12 +279,15 @@ def run_mode(case, mode_name, args):
 
 def result_metrics(result, reference_obs, is_reference):
     obs = sum(result["observations"].values())
-    impossible = sum(result["impossible"].values())
     return {
         "samples": result["samples"],
         "obs": obs,
         "error_percent": 100.0 * result["errors"] / result["attempts"],
-        "impossible_percent": 100.0 * impossible / obs if obs else 0.0,
+        "impossible_percent": (
+            100.0 * result["impossible"] / result["samples"]
+            if result["samples"]
+            else 0.0
+        ),
         "tvd": None if is_reference else tvd(result["observations"], reference_obs),
     }
 
