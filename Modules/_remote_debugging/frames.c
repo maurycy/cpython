@@ -584,7 +584,8 @@ try_full_cache_hit(
     return 1;
 }
 
-// The caller validates the pop epoch and stores the cache entry.
+// High-level helper: collect frames with cache optimization
+// Returns complete frame_info list, handling all cache logic internally
 int
 collect_frames_with_cache(
     RemoteUnwinderObject *unwinder,
@@ -658,6 +659,17 @@ collect_frames_with_cache(
         if (ctx->last_profiled.frame == 0) {
             STATS_INC(unwinder, frame_cache_misses);
         }
+    }
+
+    if (ctx->last_profiled.frame == 0) {
+        return 0;
+    }
+
+    if (frame_cache_store(unwinder, thread_id, ctx->frame_info, ctx->frame_addrs,
+                          ctx->num_addrs, ctx->thread_state_addr,
+                          ctx->last_profiled.seq, ctx->base_frame_addr,
+                          ctx->last_frame_visited) < 0) {
+        return -1;
     }
 
     return 0;

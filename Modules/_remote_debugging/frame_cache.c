@@ -154,7 +154,7 @@ frame_cache_invalidate_stale(RemoteUnwinderObject *unwinder, PyObject *result)
     }
 }
 
-int
+static int
 read_last_profiled_anchor(RemoteUnwinderObject *unwinder,
                           uintptr_t thread_state_addr,
                           FrameCacheAnchor *anchor)
