@@ -267,10 +267,10 @@ def run_mode(case, mode_name, args):
 
 
 def result_metrics(result, reference_obs, is_reference):
-    obs = sum(result["observations"].values())
     return {
         "samples": result["samples"],
-        "obs": obs,
+        "errors": result["errors"],
+        "impossible": result["impossible"],
         "error_percent": 100.0 * result["errors"] / result["attempts"],
         "impossible_percent": (
             100.0 * result["impossible"] / result["samples"]
@@ -301,7 +301,7 @@ def print_results(case_name, run_results, modes, reference_mode):
     print(f"\n{case_name}")
     print(
         f"{'metric':<12} {'mode':<18} {'runs':>4} {'samples':>8} "
-        f"{'obs':>8} {'mean':>8} {'stdev':>8} {'min':>8} {'max':>8}"
+        f"{'events':>8} {'mean':>8} {'stdev':>8} {'min':>8} {'max':>8}"
     )
     metrics_by_mode = {
         mode: [
@@ -316,15 +316,19 @@ def print_results(case_name, run_results, modes, reference_mode):
     }
 
     metric_specs = (
-        ("errors%", "error_percent", 2),
-        ("impossible%", "impossible_percent", 2),
-        ("tvd", "tvd", 3),
+        ("errors%", "error_percent", 2, "errors"),
+        ("impossible%", "impossible_percent", 2, "impossible"),
+        ("tvd", "tvd", 3, None),
     )
-    for metric_name, key, precision in metric_specs:
+    for metric_name, key, precision, event_key in metric_specs:
         for mode in modes:
             metrics = metrics_by_mode[mode]
             samples = sum(item["samples"] for item in metrics)
-            obs = sum(item["obs"] for item in metrics)
+            events = (
+                str(sum(item[event_key] for item in metrics))
+                if event_key is not None
+                else "-"
+            )
             if key == "tvd" and mode == reference_mode:
                 mean = stdev = min_value = max_value = "ref"
             else:
@@ -333,7 +337,7 @@ def print_results(case_name, run_results, modes, reference_mode):
                 )
             print(
                 f"{metric_name:<12} {mode:<18} {len(metrics):>4} "
-                f"{samples:>8} {obs:>8} {mean:>8} {stdev:>8} "
+                f"{samples:>8} {events:>8} {mean:>8} {stdev:>8} "
                 f"{min_value:>8} {max_value:>8}"
             )
 
