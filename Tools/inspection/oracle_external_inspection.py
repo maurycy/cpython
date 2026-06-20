@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import os
 import random
 import subprocess
 import statistics
@@ -58,7 +59,8 @@ DEEP_ALTERNATING_BRANCHES = {
 
 
 def classify_deep(frames):
-    names = {frame.funcname for frame in frames}
+    frame_names = [frame.funcname for frame in frames]
+    names = set(frame_names)
     present = [
         family
         for family, chain in DEEP_ALTERNATING_BRANCHES.items()
@@ -76,6 +78,15 @@ def classify_deep(frames):
             (
                 f"impossible:torn:{present[0]}",
                 f"{chain[depth]} without ancestors {','.join(missing)}",
+            )
+        ]
+    stack_order = [name for name in reversed(chain[: depth + 1])]
+    indices = [frame_names.index(name) for name in stack_order]
+    if indices != sorted(indices):
+        return [
+            (
+                f"impossible:order:{present[0]}",
+                f"expected {'/'.join(stack_order)} in leaf-to-root order",
             )
         ]
     return [(f"{present[0]}:{chain[depth]}", None)]
@@ -119,26 +130,31 @@ def terminate_process(proc):
 
 @contextlib.contextmanager
 def target_process(code, warmup):
-    with tempfile.NamedTemporaryFile("w", suffix=".py") as tmp:
+    with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp:
         tmp.write(code)
         tmp.flush()
+        tmp_name = tmp.name
+    proc = None
+    try:
         proc = subprocess.Popen(
-            [sys.executable, tmp.name],
+            [sys.executable, tmp_name],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        try:
-            time.sleep(warmup)
-            if proc.poll() is not None:
-                out, err = proc.communicate()
-                raise RuntimeError(
-                    f"target exited unexpectedly\n"
-                    f"stdout:\n{out.decode()}\nstderr:\n{err.decode()}"
-                )
-            yield proc
-        finally:
-            with contextlib.suppress(Exception):
+        time.sleep(warmup)
+        if proc.poll() is not None:
+            out, err = proc.communicate()
+            raise RuntimeError(
+                f"target exited unexpectedly\n"
+                f"stdout:\n{out.decode()}\nstderr:\n{err.decode()}"
+            )
+        yield proc
+    finally:
+        with contextlib.suppress(Exception):
+            if proc is not None:
                 terminate_process(proc)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp_name)
 
 
 def get_trace(unwinder, blocking):
