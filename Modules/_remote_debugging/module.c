@@ -808,10 +808,10 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
                                                            main_thread_tstate,
                                                            &prefetch);
             if (!frame_info) {
-                // Check if this was an intentional skip due to mode-based filtering
-                if ((self->mode == PROFILING_MODE_CPU || self->mode == PROFILING_MODE_GIL ||
-                     self->mode == PROFILING_MODE_EXCEPTION) && !PyErr_Occurred()) {
-                    // Detect cycle: if current_tstate didn't advance, we have corrupted data
+                // NULL with no exception is an intentional skip (mode filter or
+                // pop-epoch drop) and must have advanced current_tstate; no
+                // advance means a corrupted thread-list cycle.
+                if (!PyErr_Occurred()) {
                     if (current_tstate == prev_tstate) {
                         Py_DECREF(interpreter_threads);
                         PyErr_Format(PyExc_RuntimeError,
@@ -1335,6 +1335,7 @@ RemoteUnwinder_dealloc(PyObject *op)
         _Py_hashtable_destroy(self->tlbc_cache);
     }
 #endif
+    clear_last_profiled_frames(self);
     if (self->handle.pid != 0) {
         _Py_RemoteDebug_ClearCache(&self->handle);
         _Py_RemoteDebug_CleanupProcHandle(&self->handle);
