@@ -162,7 +162,7 @@ def print_run_info(args, cases, modes):
     print(
         f"cases={','.join(cases)} modes={','.join(modes)} "
         f"reference={args.reference_mode} runs={args.runs} "
-        f"samples={args.samples} duration={args.duration} "
+        f"duration={args.duration} "
         f"rate_khz={args.rate_khz} warmup={args.warmup} "
         f"poisson_sampling={args.poisson_sampling}"
     )
@@ -237,13 +237,9 @@ def run_mode(case, mode_name, args):
         rate_hz = args.rate_khz * 1000
         period = 1.0 / rate_hz if rate_hz else 0
         next_sample = time.perf_counter()
-        deadline = (
-            time.perf_counter() + args.duration
-            if args.duration is not None
-            else None
-        )
+        deadline = time.perf_counter() + args.duration
 
-        while deadline is None or time.perf_counter() < deadline:
+        while time.perf_counter() < deadline:
             result["attempts"] += 1
             if period:
                 if args.poisson_sampling:
@@ -267,8 +263,6 @@ def run_mode(case, mode_name, args):
                         result["impossible"] += 1
                     else:
                         result["observations"][stack_key(thread.frame_info)] += 1
-            if deadline is None and result["attempts"] >= args.samples:
-                break
     return result
 
 
@@ -367,15 +361,10 @@ def parse_args():
         help="mode used as the distribution reference",
     )
     parser.add_argument(
-        "--samples",
-        type=int,
-        default=10_000,
-        help="number of stack trace attempts per mode when duration is unset",
-    )
-    parser.add_argument(
         "--duration",
         type=float,
-        help="seconds to sample each mode; overrides samples when set",
+        default=3.0,
+        help="seconds to sample each mode",
     )
     parser.add_argument(
         "--runs",
