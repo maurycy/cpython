@@ -60,6 +60,13 @@ CASES = {
 }
 
 
+class HelpFormatter(argparse.ArgumentDefaultsHelpFormatter):
+    def _get_help_string(self, action):
+        if action.default is None:
+            return action.help
+        return super()._get_help_string(action)
+
+
 def tvd(left, right):
     lt, rt = sum(left.values()), sum(right.values())
     if not lt or not rt:
@@ -205,18 +212,62 @@ def print_results(case_name, results, reference, args):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--case", choices=sorted(CASES), action="append")
-    parser.add_argument("--mode", choices=sorted(MODES), action="append")
-    parser.add_argument(
-        "--reference-mode", choices=sorted(MODES), default="blocking-nocache"
+    parser = argparse.ArgumentParser(
+        formatter_class=HelpFormatter
     )
-    parser.add_argument("--samples", type=int, default=10_000)
-    parser.add_argument("--rate", type=float, default=1_000)
-    parser.add_argument("--warmup", type=float, default=0.7)
-    parser.add_argument("--main-thread", action="store_true")
-    parser.add_argument("--max-impossible-percent", type=float, default=1.0)
-    parser.add_argument("--max-tvd", type=float, default=0.05)
+    parser.add_argument(
+        "--case",
+        choices=sorted(CASES),
+        action="append",
+        help="case to run; may be passed more than once; omit to run all cases",
+    )
+    parser.add_argument(
+        "--mode",
+        choices=sorted(MODES),
+        action="append",
+        help="mode to run; may be passed more than once; omit to run all modes",
+    )
+    parser.add_argument(
+        "--reference-mode",
+        choices=sorted(MODES),
+        default="blocking-nocache",
+        help="mode used as the distribution reference",
+    )
+    parser.add_argument(
+        "--samples",
+        type=int,
+        default=10_000,
+        help="number of stack trace attempts per mode",
+    )
+    parser.add_argument(
+        "--rate",
+        type=float,
+        default=1_000,
+        help="maximum sampling rate in Hz; 0 samples as fast as possible",
+    )
+    parser.add_argument(
+        "--warmup",
+        type=float,
+        default=0.7,
+        help="seconds to let the target run before sampling",
+    )
+    parser.add_argument(
+        "--main-thread",
+        action="store_true",
+        help="sample only the target main thread",
+    )
+    parser.add_argument(
+        "--max-impossible-percent",
+        type=float,
+        default=1.0,
+        help="maximum allowed impossible observation percentage",
+    )
+    parser.add_argument(
+        "--max-tvd",
+        type=float,
+        default=0.05,
+        help="maximum allowed total variation distance from the reference",
+    )
     return parser.parse_args()
 
 
