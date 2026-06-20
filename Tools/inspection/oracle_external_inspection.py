@@ -150,14 +150,11 @@ def tvd(left, right):
     )
 
 
-def stack_key(frames, target_filename):
-    parts = []
-    for frame in frames:
-        location = getattr(frame, "location", None)
-        if getattr(location, "filename", None) != target_filename:
-            continue
-        parts.append(f"{frame.funcname}:{getattr(location, 'lineno', None)}")
-    return ";".join(parts) if parts else "no-target-frame"
+def stack_key(frames):
+    return ";".join(
+        f"{frame.funcname}:{getattr(getattr(frame, 'location', None), 'lineno', None)}"
+        for frame in frames
+    )
 
 
 def print_run_info(args, cases, modes):
@@ -202,7 +199,7 @@ def target_process(code, warmup):
                 f"target exited unexpectedly\n"
                 f"stdout:\n{out.decode()}\nstderr:\n{err.decode()}"
             )
-        yield proc, tmp_name
+        yield proc
     finally:
         with contextlib.suppress(Exception):
             if proc is not None:
@@ -231,7 +228,7 @@ def run_mode(case, mode_name, args):
         "observations": Counter(),
         "impossible": 0,
     }
-    with target_process(code, args.warmup) as (proc, target_filename):
+    with target_process(code, args.warmup) as proc:
         unwinder = _remote_debugging.RemoteUnwinder(
             proc.pid,
             all_threads=True,
@@ -269,9 +266,7 @@ def run_mode(case, mode_name, args):
                     if classify(thread.frame_info):
                         result["impossible"] += 1
                     else:
-                        result["observations"][
-                            stack_key(thread.frame_info, target_filename)
-                        ] += 1
+                        result["observations"][stack_key(thread.frame_info)] += 1
             if deadline is None and result["attempts"] >= args.samples:
                 break
     return result
