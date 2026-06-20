@@ -92,8 +92,66 @@ def classify_deep(frames):
     return [(f"{present[0]}:{chain[depth]}", None)]
 
 
+SHARED_LEAF_CODE = """\
+def shared_leaf(long_run):
+    total = 0
+    if long_run:
+        for i in range(50000):
+            total += i
+    else:
+        for i in range(200):
+            total += i
+    return total
+
+def a_wrapper():
+    return shared_leaf(False)
+
+def b_wrapper():
+    return shared_leaf(True)
+
+while True:
+    a_wrapper()
+    b_wrapper()
+"""
+
+
+def _branch_lines(code, marker):
+    for number, line in enumerate(code.splitlines(), 1):
+        if marker in line:
+            return {number, number + 1}
+    return set()
+
+
+SHARED_LEAF_LONG_LINES = _branch_lines(SHARED_LEAF_CODE, "range(50000)")
+SHARED_LEAF_SHORT_LINES = _branch_lines(SHARED_LEAF_CODE, "range(200)")
+
+
+def classify_shared(frames):
+    frame_names = [frame.funcname for frame in frames]
+    names = set(frame_names)
+    if "a_wrapper" in names and "b_wrapper" in names:
+        return [("impossible:cross:a/b", "a_wrapper and b_wrapper in one stack")]
+    if "shared_leaf" not in names:
+        return [(f"top:{frames[0].funcname}", None)] if frames else []
+    index = frame_names.index("shared_leaf")
+    parent = frame_names[index + 1] if index + 1 < len(frame_names) else None
+    if parent not in ("a_wrapper", "b_wrapper"):
+        return [("impossible:orphan", f"shared_leaf under {parent}")]
+    lineno = getattr(getattr(frames[index], "location", None), "lineno", -1)
+    if lineno in SHARED_LEAF_LONG_LINES:
+        if parent != "b_wrapper":
+            return [("impossible:parent-line", f"long branch under {parent}")]
+        return [("b:shared_leaf:long", None)]
+    if lineno in SHARED_LEAF_SHORT_LINES:
+        if parent != "a_wrapper":
+            return [("impossible:parent-line", f"short branch under {parent}")]
+        return [("a:shared_leaf:short", None)]
+    return [(f"{parent}:shared_leaf:boundary", None)]
+
+
 CASES = {
     "deep_alternating": (DEEP_ALTERNATING_CODE, classify_deep),
+    "shared_leaf": (SHARED_LEAF_CODE, classify_shared),
 }
 
 
