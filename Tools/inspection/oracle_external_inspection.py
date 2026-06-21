@@ -21,9 +21,11 @@ MODES = {
     "blocking-nocache": (True, False),
 }
 
+
 def collapse_cache(mode):
     blocking, _ = MODES[mode]
     return "blocking-nocache" if blocking else "live-nocache"
+
 
 FLAT_ALTERNATING_CODE = """\
 def leaf_a(): return sum(range(50))
@@ -62,10 +64,14 @@ def classify_flat(frames):
     hot_a, hot_b = "hot_a" in present, "hot_b" in present
     leaf_a, leaf_b = "leaf_a" in present, "leaf_b" in present
     return (
-        leaf_a and hot_b
-        or leaf_b and hot_a
-        or hot_a and hot_b
-        or (leaf_a or leaf_b) and not (hot_a or hot_b)
+        leaf_a
+        and hot_b
+        or leaf_b
+        and hot_a
+        or hot_a
+        and hot_b
+        or (leaf_a or leaf_b)
+        and not (hot_a or hot_b)
     )
 
 
@@ -281,7 +287,15 @@ def _frame_tag(frames):
     fns = {frame.funcname for frame in frames}
     hot = bool(fns & {"run_hot", "leaf_hot"})
     rare = bool(fns & {"run_rare", "leaf_rare"})
-    return "mixed" if (hot and rare) else "hot" if hot else "rare" if rare else None
+    return (
+        "mixed"
+        if (hot and rare)
+        else "hot"
+        if hot
+        else "rare"
+        if rare
+        else None
+    )
 
 
 def classify_async_running_task(unit):
@@ -320,11 +334,10 @@ def stack_key(frames):
     )
 
 
-def print_run_info(args, cases, modes):
+def print_run_info(args, cases):
     print(sys.version.replace("\n", " "))
     print(
-        f"cases={','.join(cases)} modes={','.join(modes)} "
-        f"reference={args.reference_mode} runs={args.runs} "
+        f"cases={','.join(cases)} runs={args.runs} "
         f"duration={args.duration} "
         f"rate_khz={args.rate_khz} warmup={args.warmup} "
         f"poisson_sampling={args.poisson_sampling}"
@@ -386,7 +399,12 @@ def iter_units(raw, op):
     if op == "get_stack_trace":
         for interp in raw:
             for thread in interp.threads:
-                yield (thread.thread_id, None, thread.status, thread.frame_info)
+                yield (
+                    thread.thread_id,
+                    None,
+                    thread.status,
+                    thread.frame_info,
+                )
     else:
         for awaited_info in raw:
             for task in awaited_info.awaited_by:
@@ -446,7 +464,9 @@ def run_mode(case, mode_name, args):
             result["samples"] += 1
             for unit in iter_units(trace, op):
                 frames = unit[3]
-                impossible = classify(unit) if classify_units else classify(frames)
+                impossible = (
+                    classify(unit) if classify_units else classify(frames)
+                )
                 result["units"] += 1
                 if impossible:
                     result["impossible"] += 1
@@ -471,7 +491,9 @@ def result_metrics(result, reference_obs, is_reference, op):
             if result["units"]
             else 0.0
         ),
-        "tvd": None if skip_tvd else tvd(result["observations"], reference_obs),
+        "tvd": None
+        if skip_tvd
+        else tvd(result["observations"], reference_obs),
     }
 
 
@@ -503,7 +525,9 @@ def print_results(case_name, run_results, modes, reference_mode, op):
             "units": sum(item["units"] for item in metrics),
             "empty": sum(item["empty"] for item in metrics),
             "errors": fmt_stat([item["error_percent"] for item in metrics], 2),
-            "impossible": fmt_stat([item["impossible_percent"] for item in metrics], 2),
+            "impossible": fmt_stat(
+                [item["impossible_percent"] for item in metrics], 2
+            ),
             "tvd": "ref"
             if mode == reference_mode
             else fmt_stat([item["tvd"] for item in metrics], 3),
@@ -599,7 +623,7 @@ def main():
     if args.reference_mode not in modes:
         modes.append(args.reference_mode)
 
-    print_run_info(args, cases, modes)
+    print_run_info(args, cases)
 
     for name in cases:
         case = CASES[name]
