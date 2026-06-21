@@ -305,6 +305,110 @@ def classify_async_running_task(unit):
     return name is not None and frame is not None and frame != name
 
 
+CODE_OBJECT_REUSE_CODE = """\
+SRC_A = "def func_a(n):\\n total=0\\n for i in range(n): total+=i*i\\n return total\\n"
+SRC_B = "def func_b(n):\\n total=0\\n for i in range(n): total+=i*i\\n return total\\n"
+WORK = 60000
+
+
+def build_a():
+    ns = {}
+    code = compile(SRC_A, "A_file.py", "exec")
+    exec(code, ns)
+    return ns["func_a"], code
+
+
+def build_b():
+    ns = {}
+    code = compile(SRC_B, "B_file.py", "exec")
+    exec(code, ns)
+    return ns["func_b"], code
+
+
+while True:
+    fa, ca = build_a()
+    fa(WORK)   # call_a
+    del fa, ca
+    fb, cb = build_b()
+    fb(WORK)   # call_b
+    del fb, cb
+"""
+
+
+def _marker_line(code, marker):
+    for number, line in enumerate(code.splitlines(), 1):
+        if marker in line:
+            return number
+    return None
+
+
+CALL_A_LINE = _marker_line(CODE_OBJECT_REUSE_CODE, "# call_a")
+CALL_B_LINE = _marker_line(CODE_OBJECT_REUSE_CODE, "# call_b")
+
+
+def classify_code_object_reuse(frames):
+    real = [f for f in frames if f.funcname != "<GC>"]
+    leaf = next((f for f in real if f.funcname in ("func_a", "func_b")), None)
+    if leaf is None:
+        return False
+    base = leaf.filename.rsplit("/", 1)[-1]
+    fn = leaf.funcname
+    if (fn == "func_a" and base == "B_file.py") or (
+        fn == "func_b" and base == "A_file.py"
+    ):
+        return True
+    index = real.index(leaf)
+    caller = real[index + 1] if index + 1 < len(real) else None
+    line = caller.location.lineno if (caller and caller.location) else None
+    if line == CALL_A_LINE and fn == "func_b":
+        return True
+    if line == CALL_B_LINE and fn == "func_a":
+        return True
+    return False
+
+
+OVERSIZED_CHUNK_CODE = """\
+NLOCALS = 1800
+
+def make(name, tag, hotbody):
+    body = "\\n".join(f"    x{i}={i}" for i in range(NLOCALS))
+    src = (
+        f"def hot_{tag}():\\n{hotbody}\\n"
+        f"def {name}():\\n{body}\\n    return hot_{tag}()\\n"
+    )
+    exec(compile(src, f"{tag}.py", "exec"), globals())
+
+make("big_a", "a", "    s=0\\n    for i in range(2000):\\n        s+=i*3\\n    return s")
+make("big_b", "b", "    s=1\\n    for i in range(2000):\\n        s^=(i<<1)\\n    return s")
+
+while True:
+    big_a()
+    big_b()
+"""
+
+
+OVERSIZED_A_FUNCS = {"big_a", "hot_a"}
+OVERSIZED_B_FUNCS = {"big_b", "hot_b"}
+
+
+def classify_oversized_chunk(frames):
+    saw_a = saw_b = False
+    for frame in frames:
+        base = frame.filename.rsplit("/", 1)[-1]
+        fn = frame.funcname
+        if base == "a.py":
+            if fn in OVERSIZED_A_FUNCS:
+                saw_a = True
+            elif fn in OVERSIZED_B_FUNCS:
+                return True
+        elif base == "b.py":
+            if fn in OVERSIZED_B_FUNCS:
+                saw_b = True
+            elif fn in OVERSIZED_A_FUNCS:
+                return True
+    return saw_a and saw_b
+
+
 CASES = {
     "flat_alternating": (FLAT_ALTERNATING_CODE, classify_flat),
     "nested_alternating": (NESTED_ALTERNATING_CODE, classify_nested),
@@ -316,6 +420,8 @@ CASES = {
         classify_async_running_task,
         "get_async_stack_trace",
     ),
+    "code_object_reuse": (CODE_OBJECT_REUSE_CODE, classify_code_object_reuse),
+    "oversized_chunk": (OVERSIZED_CHUNK_CODE, classify_oversized_chunk),
 }
 
 
