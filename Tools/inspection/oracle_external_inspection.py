@@ -21,6 +21,10 @@ MODES = {
     "blocking-nocache": (True, False),
 }
 
+def collapse_cache(mode):
+    blocking, _ = MODES[mode]
+    return "blocking-nocache" if blocking else "live-nocache"
+
 FLAT_ALTERNATING_CODE = """\
 def leaf_a(): return sum(range(50))
 def leaf_b(): return sum(range(50))
@@ -241,12 +245,72 @@ def classify_recursion(frames):
     return "a" in names and "b" in names
 
 
+ASYNC_RUNNING_TASK_CODE = """\
+import asyncio
+
+
+def leaf_hot(n):
+    return sum(range(n))
+
+
+def leaf_rare(n):
+    return sum(range(n))
+
+
+async def run_hot():
+    while True:
+        leaf_hot(50000)
+        await asyncio.sleep(0)
+
+
+async def run_rare(k):
+    while True:
+        leaf_rare(500)
+        await asyncio.sleep(0)
+
+
+async def main():
+    tasks = [asyncio.create_task(run_hot(), name="hot")]
+    for k in range(8):
+        tasks.append(asyncio.create_task(run_rare(k), name=f"rare{k}"))
+    await asyncio.gather(*tasks)
+
+
+asyncio.run(main())
+"""
+
+
+def _name_tag(label):
+    label = (label or "").lower()
+    return "hot" if "hot" in label else "rare" if "rare" in label else None
+
+
+def _frame_tag(frames):
+    fns = {frame.funcname for frame in frames}
+    hot = bool(fns & {"run_hot", "leaf_hot"})
+    rare = bool(fns & {"run_rare", "leaf_rare"})
+    return "mixed" if (hot and rare) else "hot" if hot else "rare" if rare else None
+
+
+def classify_async_running_task(unit):
+    name = _name_tag(unit[1])
+    frame = _frame_tag(unit[3])
+    if name is None or frame is None:
+        return False
+    return frame != name
+
+
 CASES = {
     "flat_alternating": (FLAT_ALTERNATING_CODE, classify_flat),
     "nested_alternating": (NESTED_ALTERNATING_CODE, classify_nested),
     "shared_leaf": (SHARED_LEAF_CODE, classify_shared),
     "gen_alternating": (GEN_ALTERNATING_CODE, classify_gen),
     "deep_recursion": (DEEP_RECURSION_CODE, classify_recursion),
+    "async_running_task": (
+        ASYNC_RUNNING_TASK_CODE,
+        classify_async_running_task,
+        "get_async_stack_trace",
+    ),
 }
 
 
@@ -317,22 +381,42 @@ def target_process(code, warmup):
             os.unlink(tmp_name)
 
 
-def get_trace(unwinder, blocking):
+def get_trace(unwinder, blocking, op="get_stack_trace"):
+    call = getattr(unwinder, op)
     if not blocking:
-        return unwinder.get_stack_trace()
+        return call()
     unwinder.pause_threads()
     try:
-        return unwinder.get_stack_trace()
+        return call()
     finally:
         unwinder.resume_threads()
 
 
+def iter_units(raw, op):
+    if op == "get_stack_trace":
+        for interp in raw:
+            for thread in interp.threads:
+                yield (thread.thread_id, None, thread.status, thread.frame_info)
+    else:
+        for awaited_info in raw:
+            for task in awaited_info.awaited_by:
+                frames = [
+                    frame
+                    for coro in task.coroutine_stack
+                    for frame in coro.call_stack
+                ]
+                if frames:
+                    yield (task.task_id, task.task_name, None, frames)
+
+
 def run_mode(case, mode_name, args):
-    code, classify = case
+    code, classify, *rest = case
+    op = rest[0] if rest else "get_stack_trace"
     blocking, cache_frames = MODES[mode_name]
     result = {
         "attempts": 0,
         "samples": 0,
+        "units": 0,
         "errors": 0,
         "observations": Counter(),
         "impossible": 0,
@@ -360,95 +444,104 @@ def run_mode(case, mode_name, args):
                     next_sample += period
 
             try:
-                trace = get_trace(unwinder, blocking)
+                trace = get_trace(unwinder, blocking, op)
             except TRANSIENT_ERRORS:
                 result["errors"] += 1
                 continue
 
+            if not trace:
+                continue
+
             result["samples"] += 1
-            for interp in trace:
-                for thread in interp.threads:
-                    if classify(thread.frame_info):
-                        result["impossible"] += 1
-                    else:
-                        result["observations"][stack_key(thread.frame_info)] += 1
+            for unit in iter_units(trace, op):
+                frames = unit[3]
+                impossible = classify(unit) if op != "get_stack_trace" else classify(frames)
+                result["units"] += 1
+                if impossible:
+                    result["impossible"] += 1
+                else:
+                    result["observations"][stack_key(frames)] += 1
     return result
 
 
-def result_metrics(result, reference_obs, is_reference):
+def result_metrics(result, reference_obs, is_reference, op):
+    skip_tvd = is_reference or op != "get_stack_trace"
     return {
         "samples": result["samples"],
-        "errors": result["errors"],
-        "impossible": result["impossible"],
-        "error_percent": 100.0 * result["errors"] / result["attempts"],
-        "impossible_percent": (
-            100.0 * result["impossible"] / result["samples"]
-            if result["samples"]
+        "units": result["units"],
+        "empty": result["attempts"] - result["samples"] - result["errors"],
+        "error_percent": (
+            100.0 * result["errors"] / result["attempts"]
+            if result["attempts"]
             else 0.0
         ),
-        "tvd": None if is_reference else tvd(result["observations"], reference_obs),
+        "impossible_percent": (
+            100.0 * result["impossible"] / result["units"]
+            if result["units"]
+            else 0.0
+        ),
+        "tvd": None if skip_tvd else tvd(result["observations"], reference_obs),
     }
 
 
-def fmt(value, precision):
-    return "n/a" if value is None else f"{value:.{precision}f}"
+def fmt_stat(values, precision):
+    vals = [value for value in values if value is not None]
+    if not vals:
+        return "n/a"
+    mean = statistics.mean(vals)
+    if len(vals) > 1:
+        return f"{mean:.{precision}f}±{statistics.stdev(vals):.{precision}f}"
+    return f"{mean:.{precision}f}"
 
 
-def metric_summary(values, precision):
-    stdev = None
-    if len(values) > 1:
-        stdev = statistics.stdev(values)
-    return (
-        fmt(statistics.mean(values), precision),
-        fmt(stdev, precision),
-        fmt(min(values), precision),
-        fmt(max(values), precision),
-    )
-
-
-def print_results(case_name, run_results, modes, reference_mode):
-    print(f"\n{case_name}")
-    print(
-        f"{'metric':<12} {'mode':<18} {'runs':>4} {'samples':>8} "
-        f"{'events':>8} {'mean':>8} {'stdev':>8} {'min':>8} {'max':>8}"
-    )
-    metrics_by_mode = {
-        mode: [
+def print_results(case_name, run_results, modes, reference_mode, op):
+    is_sync = op == "get_stack_trace"
+    rows = {}
+    for mode in modes:
+        metrics = [
             result_metrics(
                 results[mode],
                 results[reference_mode]["observations"],
                 mode == reference_mode,
+                op,
             )
             for results in run_results
         ]
-        for mode in modes
-    }
+        rows[mode] = {
+            "samples": sum(item["samples"] for item in metrics),
+            "units": sum(item["units"] for item in metrics),
+            "empty": sum(item["empty"] for item in metrics),
+            "errors": fmt_stat([item["error_percent"] for item in metrics], 2),
+            "impossible": fmt_stat([item["impossible_percent"] for item in metrics], 2),
+            "tvd": "ref"
+            if mode == reference_mode
+            else fmt_stat([item["tvd"] for item in metrics], 3),
+        }
 
-    metric_specs = (
-        ("errors%", "error_percent", 2, "errors"),
-        ("impossible%", "impossible_percent", 2, "impossible"),
-        ("tvd", "tvd", 3, None),
-    )
-    for metric_name, key, precision, event_key in metric_specs:
-        for mode in modes:
-            metrics = metrics_by_mode[mode]
-            samples = sum(item["samples"] for item in metrics)
-            events = (
-                str(sum(item[event_key] for item in metrics))
-                if event_key is not None
-                else "-"
-            )
-            if key == "tvd" and mode == reference_mode:
-                mean = stdev = min_value = max_value = "ref"
-            else:
-                mean, stdev, min_value, max_value = metric_summary(
-                    [item[key] for item in metrics], precision
-                )
-            print(
-                f"{metric_name:<12} {mode:<18} {len(metrics):>4} "
-                f"{samples:>8} {events:>8} {mean:>8} {stdev:>8} "
-                f"{min_value:>8} {max_value:>8}"
-            )
+    show_units = any(row["units"] != row["samples"] for row in rows.values())
+
+    print(f"\n{case_name} ({op})")
+    header = [f"{'mode':<18}", f"{'samples':>9}"]
+    if show_units:
+        header.append(f"{'units':>9}")
+    if not is_sync:
+        header.append(f"{'empty':>9}")
+    header += [f"{'errors%':>12}", f"{'impossible%':>12}"]
+    if is_sync:
+        header.append(f"{'tvd':>11}")
+    print(" ".join(header))
+
+    for mode in modes:
+        row = rows[mode]
+        line = [f"{mode:<18}", f"{row['samples']:>9}"]
+        if show_units:
+            line.append(f"{row['units']:>9}")
+        if not is_sync:
+            line.append(f"{row['empty']:>9}")
+        line += [f"{row['errors']:>12}", f"{row['impossible']:>12}"]
+        if is_sync:
+            line.append(f"{row['tvd']:>11}")
+        print(" ".join(line))
 
 
 def parse_args():
@@ -519,11 +612,20 @@ def main():
 
     for name in cases:
         case = CASES[name]
+        op = case[2] if len(case) > 2 else "get_stack_trace"
+        if op == "get_stack_trace":
+            case_modes = list(modes)
+            case_ref = args.reference_mode
+        else:
+            case_ref = collapse_cache(args.reference_mode)
+            case_modes = list(dict.fromkeys(collapse_cache(m) for m in modes))
+        if case_ref not in case_modes:
+            case_modes.append(case_ref)
         run_results = [
-            {mode: run_mode(case, mode, args) for mode in modes}
+            {mode: run_mode(case, mode, args) for mode in case_modes}
             for _ in range(args.runs)
         ]
-        print_results(name, run_results, modes, args.reference_mode)
+        print_results(name, run_results, case_modes, case_ref, op)
     return 0
 
 
