@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import math
 import os
 import random
 import subprocess
@@ -327,6 +328,22 @@ def tvd(left, right):
     )
 
 
+def tvd_floor(reference_obs, n_live):
+    n_ref = sum(reference_obs.values())
+    if not n_ref or not n_live:
+        return None
+    spread = sum(
+        math.sqrt(p * (1 - p))
+        for p in (c / n_ref for c in reference_obs.values())
+    )
+    return (
+        0.5
+        * math.sqrt(2 / math.pi)
+        * math.sqrt(1 / n_live + 1 / n_ref)
+        * spread
+    )
+
+
 def stack_key(frames):
     return ";".join(
         f"{frame.funcname}:{getattr(getattr(frame, 'location', None), 'lineno', None)}"
@@ -477,10 +494,14 @@ def run_mode(case, mode_name, args):
 
 def result_metrics(result, reference_obs, is_reference, op):
     skip_tvd = is_reference or op != "get_stack_trace"
+    n_live = sum(result["observations"].values())
+    raw_tvd = None if skip_tvd else tvd(result["observations"], reference_obs)
+    floor = None if skip_tvd else tvd_floor(reference_obs, n_live)
     return {
         "samples": result["samples"],
         "units": result["units"],
         "empty": result["attempts"] - result["samples"] - result["errors"],
+        "impossible": result["impossible"],
         "error_percent": (
             100.0 * result["errors"] / result["attempts"]
             if result["attempts"]
@@ -491,9 +512,11 @@ def result_metrics(result, reference_obs, is_reference, op):
             if result["units"]
             else 0.0
         ),
-        "tvd": None
-        if skip_tvd
-        else tvd(result["observations"], reference_obs),
+        "raw_tvd": raw_tvd,
+        "tvd_floor": floor,
+        "tvd_excess": (
+            None if (raw_tvd is None or floor is None) else raw_tvd - floor
+        ),
     }
 
 
@@ -507,8 +530,14 @@ def fmt_stat(values, precision):
     return f"{mean:.{precision}f}"
 
 
+def fmt_floor(values):
+    vals = [value for value in values if value is not None]
+    return "n/a" if not vals else f"{statistics.median(vals):.3f}"
+
+
 def print_results(case_name, run_results, modes, reference_mode, op):
     is_sync = op == "get_stack_trace"
+    ref_keys = len(run_results[0][reference_mode]["observations"])
     rows = {}
     for mode in modes:
         metrics = [
@@ -524,38 +553,51 @@ def print_results(case_name, run_results, modes, reference_mode, op):
             "samples": sum(item["samples"] for item in metrics),
             "units": sum(item["units"] for item in metrics),
             "empty": sum(item["empty"] for item in metrics),
+            "impossible": sum(item["impossible"] for item in metrics),
             "errors": fmt_stat([item["error_percent"] for item in metrics], 2),
-            "impossible": fmt_stat(
+            "impossible_pct": fmt_stat(
                 [item["impossible_percent"] for item in metrics], 2
             ),
-            "tvd": "ref"
+            "tvd_excess": "ref"
             if mode == reference_mode
-            else fmt_stat([item["tvd"] for item in metrics], 3),
+            else fmt_stat([item["tvd_excess"] for item in metrics], 3),
+            "tvd_floor": "-"
+            if mode == reference_mode
+            else fmt_floor([item["tvd_floor"] for item in metrics]),
         }
 
     show_units = any(row["units"] != row["samples"] for row in rows.values())
+    ordered = [reference_mode] + [m for m in modes if m != reference_mode]
 
-    print(f"\n{case_name} ({op})")
+    print(f"\n{case_name} ({op}) ref_keys={ref_keys}")
     header = [f"{'mode':<18}", f"{'samples':>9}"]
     if show_units:
         header.append(f"{'units':>9}")
     if not is_sync:
         header.append(f"{'empty':>9}")
-    header += [f"{'errors%':>12}", f"{'impossible%':>12}"]
+    header += [
+        f"{'errors%':>12}",
+        f"{'impossible':>10}",
+        f"{'impossible%':>12}",
+    ]
     if is_sync:
-        header.append(f"{'tvd':>11}")
+        header += [f"{'tvd_excess':>12}", f"{'tvd_floor':>10}"]
     print(" ".join(header))
 
-    for mode in modes:
+    for mode in ordered:
         row = rows[mode]
         line = [f"{mode:<18}", f"{row['samples']:>9}"]
         if show_units:
             line.append(f"{row['units']:>9}")
         if not is_sync:
             line.append(f"{row['empty']:>9}")
-        line += [f"{row['errors']:>12}", f"{row['impossible']:>12}"]
+        line += [
+            f"{row['errors']:>12}",
+            f"{row['impossible']:>10}",
+            f"{row['impossible_pct']:>12}",
+        ]
         if is_sync:
-            line.append(f"{row['tvd']:>11}")
+            line += [f"{row['tvd_excess']:>12}", f"{row['tvd_floor']:>10}"]
         print(" ".join(line))
 
 
