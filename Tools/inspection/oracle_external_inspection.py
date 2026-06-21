@@ -23,6 +23,13 @@ MODES = {
 }
 
 
+def _get_lineno(frame, default=None):
+    if frame is None:
+        return default
+    loc = getattr(frame, "location", None)
+    return getattr(loc, "lineno", default) if loc is not None else default
+
+
 def collapse_cache(mode):
     blocking, _ = MODES[mode]
     return "blocking-nocache" if blocking else "live-nocache"
@@ -54,9 +61,7 @@ def classify_flat(frames):
     present = {}
     for frame in frames:
         if frame.funcname in FLAT_ALTERNATING_LINES:
-            present[frame.funcname] = getattr(
-                getattr(frame, "location", None), "lineno", -1
-            )
+            present[frame.funcname] = _get_lineno(frame, -1)
     if not present:
         return False
     for name, lineno in present.items():
@@ -64,16 +69,9 @@ def classify_flat(frames):
             return True
     hot_a, hot_b = "hot_a" in present, "hot_b" in present
     leaf_a, leaf_b = "leaf_a" in present, "leaf_b" in present
-    return (
-        leaf_a
-        and hot_b
-        or leaf_b
-        and hot_a
-        or hot_a
-        and hot_b
-        or (leaf_a or leaf_b)
-        and not (hot_a or hot_b)
-    )
+    any_a = leaf_a or hot_a
+    any_b = leaf_b or hot_b
+    return (any_a and any_b) or (leaf_a and not hot_a) or (leaf_b and not hot_b)
 
 
 NESTED_ALTERNATING_CODE = """\
@@ -126,11 +124,11 @@ def classify_nested(frames):
     if not present:
         return False
     chain = NESTED_ALTERNATING_BRANCHES[present[0]]
-    depth = max(chain.index(name) for name in chain if name in names)
-    if any(chain[i] not in names for i in range(depth)):
+    active = [name for name in chain if name in names]
+    depth = chain.index(active[-1])
+    if len(active) != depth + 1:
         return True
-    stack_order = [name for name in reversed(chain[: depth + 1])]
-    indices = [frame_names.index(name) for name in stack_order]
+    indices = [frame_names.index(name) for name in reversed(active)]
     return indices != sorted(indices)
 
 
@@ -179,7 +177,7 @@ def classify_shared(frames):
     parent = frame_names[index + 1] if index + 1 < len(frame_names) else None
     if parent not in ("a_wrapper", "b_wrapper"):
         return True
-    lineno = getattr(getattr(frames[index], "location", None), "lineno", -1)
+    lineno = _get_lineno(frames[index], -1)
     if lineno in SHARED_LEAF_LONG_LINES:
         return parent != "b_wrapper"
     if lineno in SHARED_LEAF_SHORT_LINES:
@@ -351,7 +349,7 @@ def classify_code_object_reuse(frames):
     leaf = next((f for f in real if f.funcname in ("func_a", "func_b")), None)
     if leaf is None:
         return False
-    base = leaf.filename.rsplit("/", 1)[-1]
+    base = os.path.basename(leaf.filename)
     fn = leaf.funcname
     if (fn == "func_a" and base == "B_file.py") or (
         fn == "func_b" and base == "A_file.py"
@@ -359,7 +357,7 @@ def classify_code_object_reuse(frames):
         return True
     index = real.index(leaf)
     caller = real[index + 1] if index + 1 < len(real) else None
-    line = caller.location.lineno if (caller and caller.location) else None
+    line = _get_lineno(caller)
     if line == CALL_A_LINE and fn == "func_b":
         return True
     if line == CALL_B_LINE and fn == "func_a":
@@ -394,7 +392,7 @@ OVERSIZED_B_FUNCS = {"big_b", "hot_b"}
 def classify_oversized_chunk(frames):
     saw_a = saw_b = False
     for frame in frames:
-        base = frame.filename.rsplit("/", 1)[-1]
+        base = os.path.basename(frame.filename)
         fn = frame.funcname
         if base == "a.py":
             if fn in OVERSIZED_A_FUNCS:
@@ -452,7 +450,7 @@ def tvd_floor(reference_obs, n_live):
 
 def stack_key(frames):
     return ";".join(
-        f"{frame.funcname}:{getattr(getattr(frame, 'location', None), 'lineno', None)}"
+        f"{frame.funcname}:{_get_lineno(frame)}"
         for frame in frames
     )
 
