@@ -371,10 +371,10 @@ OVERSIZED_CHUNK_CODE = """\
 NLOCALS = 1800
 
 def make(name, tag, hotbody):
-    body = "\\n".join(f"    x{i}={i}" for i in range(NLOCALS))
+    params = ", ".join(f"x{i}=0" for i in range(NLOCALS))
     src = (
         f"def hot_{tag}():\\n{hotbody}\\n"
-        f"def {name}():\\n{body}\\n    return hot_{tag}()\\n"
+        f"def {name}({params}):\\n    return hot_{tag}()\\n"
     )
     exec(compile(src, f"{tag}.py", "exec"), globals())
 
