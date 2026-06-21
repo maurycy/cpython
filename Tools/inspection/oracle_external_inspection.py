@@ -68,7 +68,7 @@ def classify_flat(frames):
     return False
 
 
-DEEP_ALTERNATING_CODE = """\
+NESTED_ALTERNATING_CODE = """\
 def burn_a():
     total = 0
     for i in range(20000):
@@ -99,25 +99,25 @@ while True:
 """
 
 
-DEEP_ALTERNATING_BRANCHES = {
+NESTED_ALTERNATING_BRANCHES = {
     "a": ["a_parent", "a_leaf", "burn_a"],
     "b": ["b_parent", "b_leaf", "burn_b"],
 }
 
 
-def classify_deep(frames):
+def classify_nested(frames):
     frame_names = [frame.funcname for frame in frames]
     names = set(frame_names)
     present = [
         family
-        for family, chain in DEEP_ALTERNATING_BRANCHES.items()
+        for family, chain in NESTED_ALTERNATING_BRANCHES.items()
         if names.intersection(chain)
     ]
     if len(present) > 1:
         return True
     if not present:
         return False
-    chain = DEEP_ALTERNATING_BRANCHES[present[0]]
+    chain = NESTED_ALTERNATING_BRANCHES[present[0]]
     depth = max(chain.index(name) for name in chain if name in names)
     missing = [chain[i] for i in range(depth) if chain[i] not in names]
     if missing:
@@ -243,7 +243,7 @@ def classify_recursion(frames):
 
 CASES = {
     "flat_alternating": (FLAT_ALTERNATING_CODE, classify_flat),
-    "deep_alternating": (DEEP_ALTERNATING_CODE, classify_deep),
+    "nested_alternating": (NESTED_ALTERNATING_CODE, classify_nested),
     "shared_leaf": (SHARED_LEAF_CODE, classify_shared),
     "gen_alternating": (GEN_ALTERNATING_CODE, classify_gen),
     "deep_recursion": (DEEP_RECURSION_CODE, classify_recursion),
