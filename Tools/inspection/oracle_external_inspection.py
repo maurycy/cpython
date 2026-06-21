@@ -61,15 +61,12 @@ def classify_flat(frames):
             return True
     hot_a, hot_b = "hot_a" in present, "hot_b" in present
     leaf_a, leaf_b = "leaf_a" in present, "leaf_b" in present
-    if leaf_a and hot_b:
-        return True
-    if leaf_b and hot_a:
-        return True
-    if hot_a and hot_b:
-        return True
-    if (leaf_a or leaf_b) and not (hot_a or hot_b):
-        return True
-    return False
+    return (
+        leaf_a and hot_b
+        or leaf_b and hot_a
+        or hot_a and hot_b
+        or (leaf_a or leaf_b) and not (hot_a or hot_b)
+    )
 
 
 NESTED_ALTERNATING_CODE = """\
@@ -123,14 +120,11 @@ def classify_nested(frames):
         return False
     chain = NESTED_ALTERNATING_BRANCHES[present[0]]
     depth = max(chain.index(name) for name in chain if name in names)
-    missing = [chain[i] for i in range(depth) if chain[i] not in names]
-    if missing:
+    if any(chain[i] not in names for i in range(depth)):
         return True
     stack_order = [name for name in reversed(chain[: depth + 1])]
     indices = [frame_names.index(name) for name in stack_order]
-    if indices != sorted(indices):
-        return True
-    return False
+    return indices != sorted(indices)
 
 
 SHARED_LEAF_CODE = """\
@@ -215,11 +209,9 @@ while True:
 
 def classify_gen(frames):
     names = {frame.funcname for frame in frames}
-    if "agen" in names and "drv_b" in names:
-        return True
-    if "bgen" in names and "drv_a" in names:
-        return True
-    return False
+    return ("agen" in names and "drv_b" in names) or (
+        "bgen" in names and "drv_a" in names
+    )
 
 
 DEEP_RECURSION_CODE = """\
@@ -295,9 +287,7 @@ def _frame_tag(frames):
 def classify_async_running_task(unit):
     name = _name_tag(unit[1])
     frame = _frame_tag(unit[3])
-    if name is None or frame is None:
-        return False
-    return frame != name
+    return name is not None and frame is not None and frame != name
 
 
 CASES = {
@@ -412,6 +402,7 @@ def iter_units(raw, op):
 def run_mode(case, mode_name, args):
     code, classify, *rest = case
     op = rest[0] if rest else "get_stack_trace"
+    classify_units = op != "get_stack_trace"
     blocking, cache_frames = MODES[mode_name]
     result = {
         "attempts": 0,
@@ -455,7 +446,7 @@ def run_mode(case, mode_name, args):
             result["samples"] += 1
             for unit in iter_units(trace, op):
                 frames = unit[3]
-                impossible = classify(unit) if op != "get_stack_trace" else classify(frames)
+                impossible = classify(unit) if classify_units else classify(frames)
                 result["units"] += 1
                 if impossible:
                     result["impossible"] += 1
