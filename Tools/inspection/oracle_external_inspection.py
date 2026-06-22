@@ -12,6 +12,8 @@ from collections import Counter
 
 import _remote_debugging
 
+from snippets import CASES, _get_lineno
+
 
 TRANSIENT_ERRORS = (OSError, RuntimeError, UnicodeDecodeError)
 
@@ -23,404 +25,9 @@ MODES = {
 }
 
 
-def _get_lineno(frame, default=None):
-    if frame is None:
-        return default
-    loc = getattr(frame, "location", None)
-    return getattr(loc, "lineno", default) if loc is not None else default
-
-
 def collapse_cache(mode):
     blocking, _ = MODES[mode]
     return "blocking-nocache" if blocking else "live-nocache"
-
-
-FLAT_ALTERNATING_CODE = """\
-def leaf_a(): return sum(range(50))
-def leaf_b(): return sum(range(50))
-def hot_a(): return leaf_a()
-def hot_b(): return leaf_b()
-while True:
-    hot_a(); hot_b()
-"""
-
-
-def _expected_lines(code):
-    expected = {}
-    for number, line in enumerate(code.splitlines(), 1):
-        stripped = line.strip()
-        if stripped.startswith("def "):
-            expected[stripped[4:].split("(")[0].strip()] = number
-    return expected
-
-
-FLAT_ALTERNATING_LINES = _expected_lines(FLAT_ALTERNATING_CODE)
-
-
-def classify_flat(frames):
-    present = {}
-    for frame in frames:
-        if frame.funcname in FLAT_ALTERNATING_LINES:
-            present[frame.funcname] = _get_lineno(frame, -1)
-    if not present:
-        return False
-    for name, lineno in present.items():
-        if lineno != FLAT_ALTERNATING_LINES[name]:
-            return True
-    hot_a, hot_b = "hot_a" in present, "hot_b" in present
-    leaf_a, leaf_b = "leaf_a" in present, "leaf_b" in present
-    any_a = leaf_a or hot_a
-    any_b = leaf_b or hot_b
-    return (any_a and any_b) or (leaf_a and not hot_a) or (leaf_b and not hot_b)
-
-
-NESTED_ALTERNATING_CODE = """\
-def burn_a():
-    total = 0
-    for i in range(20000):
-        total += i
-    return total
-
-def burn_b():
-    total = 0
-    for i in range(20000):
-        total += i
-    return total
-
-def a_leaf():
-    return burn_a()
-
-def b_leaf():
-    return burn_b()
-
-def a_parent():
-    return a_leaf()
-
-def b_parent():
-    return b_leaf()
-
-while True:
-    a_parent()
-    b_parent()
-"""
-
-
-NESTED_ALTERNATING_BRANCHES = {
-    "a": ["a_parent", "a_leaf", "burn_a"],
-    "b": ["b_parent", "b_leaf", "burn_b"],
-}
-
-
-def classify_nested(frames):
-    frame_names = [frame.funcname for frame in frames]
-    names = set(frame_names)
-    present = [
-        family
-        for family, chain in NESTED_ALTERNATING_BRANCHES.items()
-        if names.intersection(chain)
-    ]
-    if len(present) > 1:
-        return True
-    if not present:
-        return False
-    chain = NESTED_ALTERNATING_BRANCHES[present[0]]
-    active = [name for name in chain if name in names]
-    depth = chain.index(active[-1])
-    if len(active) != depth + 1:
-        return True
-    indices = [frame_names.index(name) for name in reversed(active)]
-    return indices != sorted(indices)
-
-
-SHARED_LEAF_CODE = """\
-def shared_leaf(long_run):
-    total = 0
-    if long_run:
-        for i in range(50000):
-            total += i
-    else:
-        for i in range(200):
-            total += i
-    return total
-
-def a_wrapper():
-    return shared_leaf(False)
-
-def b_wrapper():
-    return shared_leaf(True)
-
-while True:
-    a_wrapper()
-    b_wrapper()
-"""
-
-
-def _branch_lines(code, marker):
-    for number, line in enumerate(code.splitlines(), 1):
-        if marker in line:
-            return {number, number + 1}
-    return set()
-
-
-SHARED_LEAF_LONG_LINES = _branch_lines(SHARED_LEAF_CODE, "range(50000)")
-SHARED_LEAF_SHORT_LINES = _branch_lines(SHARED_LEAF_CODE, "range(200)")
-
-
-def classify_shared(frames):
-    frame_names = [frame.funcname for frame in frames]
-    names = set(frame_names)
-    if "a_wrapper" in names and "b_wrapper" in names:
-        return True
-    if "shared_leaf" not in names:
-        return False
-    index = frame_names.index("shared_leaf")
-    parent = frame_names[index + 1] if index + 1 < len(frame_names) else None
-    if parent not in ("a_wrapper", "b_wrapper"):
-        return True
-    lineno = _get_lineno(frames[index], -1)
-    if lineno in SHARED_LEAF_LONG_LINES:
-        return parent != "b_wrapper"
-    if lineno in SHARED_LEAF_SHORT_LINES:
-        return parent != "a_wrapper"
-    return False
-
-
-GEN_ALTERNATING_CODE = """\
-def agen(n):
-    total = 0
-    for i in range(n):
-        total += i
-        yield i
-
-def bgen(n):
-    total = 0
-    for i in range(n):
-        total += i
-        yield i
-
-def drv_a():
-    for _ in agen(60):
-        pass
-
-def drv_b():
-    for _ in bgen(60):
-        pass
-
-while True:
-    drv_a()
-    drv_b()
-"""
-
-
-def classify_gen(frames):
-    names = {frame.funcname for frame in frames}
-    return ("agen" in names and "drv_b" in names) or (
-        "bgen" in names and "drv_a" in names
-    )
-
-
-DEEP_RECURSION_CODE = """\
-def leaf():
-    total = 0
-    for i in range(40):
-        total += i
-
-def a(n):
-    return a(n - 1) if n else leaf()
-
-def b(n):
-    return b(n - 1) if n else leaf()
-
-while True:
-    a(300)
-    b(300)
-"""
-
-
-def classify_recursion(frames):
-    names = {frame.funcname for frame in frames}
-    return "a" in names and "b" in names
-
-
-ASYNC_RUNNING_TASK_CODE = """\
-import asyncio
-
-
-def leaf_hot(n):
-    return sum(range(n))
-
-
-def leaf_rare(n):
-    return sum(range(n))
-
-
-async def run_hot():
-    while True:
-        leaf_hot(50000)
-        await asyncio.sleep(0)
-
-
-async def run_rare(k):
-    while True:
-        leaf_rare(500)
-        await asyncio.sleep(0)
-
-
-async def main():
-    tasks = [asyncio.create_task(run_hot(), name="hot")]
-    for k in range(8):
-        tasks.append(asyncio.create_task(run_rare(k), name=f"rare{k}"))
-    await asyncio.gather(*tasks)
-
-
-asyncio.run(main())
-"""
-
-
-def _name_tag(label):
-    label = (label or "").lower()
-    return "hot" if "hot" in label else "rare" if "rare" in label else None
-
-
-def _frame_tag(frames):
-    fns = {frame.funcname for frame in frames}
-    hot = bool(fns & {"run_hot", "leaf_hot"})
-    rare = bool(fns & {"run_rare", "leaf_rare"})
-    return (
-        "mixed"
-        if (hot and rare)
-        else "hot"
-        if hot
-        else "rare"
-        if rare
-        else None
-    )
-
-
-def classify_async_running_task(unit):
-    name = _name_tag(unit[1])
-    frame = _frame_tag(unit[3])
-    return name is not None and frame is not None and frame != name
-
-
-CODE_OBJECT_REUSE_CODE = """\
-SRC_A = "def func_a(n):\\n total=0\\n for i in range(n): total+=i*i\\n return total\\n"
-SRC_B = "def func_b(n):\\n total=0\\n for i in range(n): total+=i*i\\n return total\\n"
-WORK = 60000
-
-
-def build_a():
-    ns = {}
-    code = compile(SRC_A, "A_file.py", "exec")
-    exec(code, ns)
-    return ns["func_a"], code
-
-
-def build_b():
-    ns = {}
-    code = compile(SRC_B, "B_file.py", "exec")
-    exec(code, ns)
-    return ns["func_b"], code
-
-
-while True:
-    fa, ca = build_a()
-    fa(WORK)   # call_a
-    del fa, ca
-    fb, cb = build_b()
-    fb(WORK)   # call_b
-    del fb, cb
-"""
-
-
-def _marker_line(code, marker):
-    for number, line in enumerate(code.splitlines(), 1):
-        if marker in line:
-            return number
-    return None
-
-
-CALL_A_LINE = _marker_line(CODE_OBJECT_REUSE_CODE, "# call_a")
-CALL_B_LINE = _marker_line(CODE_OBJECT_REUSE_CODE, "# call_b")
-
-
-def classify_code_object_reuse(frames):
-    real = [f for f in frames if f.funcname != "<GC>"]
-    leaf = next((f for f in real if f.funcname in ("func_a", "func_b")), None)
-    if leaf is None:
-        return False
-    base = os.path.basename(leaf.filename)
-    fn = leaf.funcname
-    if (fn == "func_a" and base == "B_file.py") or (
-        fn == "func_b" and base == "A_file.py"
-    ):
-        return True
-    index = real.index(leaf)
-    caller = real[index + 1] if index + 1 < len(real) else None
-    line = _get_lineno(caller)
-    if line == CALL_A_LINE and fn == "func_b":
-        return True
-    if line == CALL_B_LINE and fn == "func_a":
-        return True
-    return False
-
-
-OVERSIZED_CHUNK_CODE = """\
-NLOCALS = 1800
-
-def make(name, tag, hotbody):
-    params = ", ".join(f"x{i}=0" for i in range(NLOCALS))
-    src = (
-        f"def hot_{tag}():\\n{hotbody}\\n"
-        f"def {name}({params}):\\n    return hot_{tag}()\\n"
-    )
-    exec(compile(src, f"{tag}.py", "exec"), globals())
-
-make("big_a", "a", "    s=0\\n    for i in range(2000):\\n        s+=i*3\\n    return s")
-make("big_b", "b", "    s=1\\n    for i in range(2000):\\n        s^=(i<<1)\\n    return s")
-
-while True:
-    big_a()
-    big_b()
-"""
-
-
-OVERSIZED_A_FUNCS = {"big_a", "hot_a"}
-OVERSIZED_B_FUNCS = {"big_b", "hot_b"}
-
-
-def classify_oversized_chunk(frames):
-    saw_a = saw_b = False
-    for frame in frames:
-        base = os.path.basename(frame.filename)
-        fn = frame.funcname
-        if base == "a.py":
-            if fn in OVERSIZED_A_FUNCS:
-                saw_a = True
-            elif fn in OVERSIZED_B_FUNCS:
-                return True
-        elif base == "b.py":
-            if fn in OVERSIZED_B_FUNCS:
-                saw_b = True
-            elif fn in OVERSIZED_A_FUNCS:
-                return True
-    return saw_a and saw_b
-
-
-CASES = {
-    "flat_alternating": (FLAT_ALTERNATING_CODE, classify_flat),
-    "nested_alternating": (NESTED_ALTERNATING_CODE, classify_nested),
-    "shared_leaf": (SHARED_LEAF_CODE, classify_shared),
-    "gen_alternating": (GEN_ALTERNATING_CODE, classify_gen),
-    "deep_recursion": (DEEP_RECURSION_CODE, classify_recursion),
-    "async_running_task": (
-        ASYNC_RUNNING_TASK_CODE,
-        classify_async_running_task,
-        "get_async_stack_trace",
-    ),
-    "code_object_reuse": (CODE_OBJECT_REUSE_CODE, classify_code_object_reuse),
-    "oversized_chunk": (OVERSIZED_CHUNK_CODE, classify_oversized_chunk),
-}
 
 
 def tvd(left, right):
@@ -450,8 +57,7 @@ def tvd_floor(reference_obs, n_live):
 
 def stack_key(frames):
     return ";".join(
-        f"{frame.funcname}:{_get_lineno(frame)}"
-        for frame in frames
+        f"{frame.funcname}:{_get_lineno(frame)}" for frame in frames
     )
 
 
@@ -546,10 +152,11 @@ def run_mode(case, mode_name, args):
     result = {
         "attempts": 0,
         "samples": 0,
-        "units": 0,
+        "stacks": 0,
         "errors": 0,
         "observations": Counter(),
         "impossible": 0,
+        "work_time": 0.0,
     }
     with target_process(code, args.warmup) as proc:
         unwinder = _remote_debugging.RemoteUnwinder(
@@ -573,11 +180,13 @@ def run_mode(case, mode_name, args):
                         time.sleep(next_sample - now)
                     next_sample += period
 
+            work_start = time.perf_counter()
             try:
                 trace = get_trace(unwinder, blocking, op)
             except TRANSIENT_ERRORS:
+                trace = None
                 result["errors"] += 1
-                continue
+            result["work_time"] += time.perf_counter() - work_start
 
             if not trace:
                 continue
@@ -585,10 +194,10 @@ def run_mode(case, mode_name, args):
             result["samples"] += 1
             for unit in iter_units(trace, op):
                 frames = unit[3]
-                impossible = (
+                impossible = classify is not None and (
                     classify(unit) if classify_units else classify(frames)
                 )
-                result["units"] += 1
+                result["stacks"] += 1
                 if impossible:
                     result["impossible"] += 1
                 else:
@@ -603,7 +212,7 @@ def result_metrics(result, reference_obs, is_reference, op):
     floor = None if skip_tvd else tvd_floor(reference_obs, n_live)
     return {
         "samples": result["samples"],
-        "units": result["units"],
+        "stacks": result["stacks"],
         "empty": result["attempts"] - result["samples"] - result["errors"],
         "impossible": result["impossible"],
         "error_percent": (
@@ -612,8 +221,13 @@ def result_metrics(result, reference_obs, is_reference, op):
             else 0.0
         ),
         "impossible_percent": (
-            100.0 * result["impossible"] / result["units"]
-            if result["units"]
+            100.0 * result["impossible"] / result["stacks"]
+            if result["stacks"]
+            else 0.0
+        ),
+        "avg_us": (
+            1e6 * result["work_time"] / result["attempts"]
+            if result["attempts"]
             else 0.0
         ),
         "raw_tvd": raw_tvd,
@@ -639,7 +253,9 @@ def fmt_floor(values):
     return "n/a" if not vals else f"{statistics.median(vals):.3f}"
 
 
-def print_results(case_name, run_results, modes, reference_mode, op):
+def print_results(
+    case_name, run_results, modes, reference_mode, op, has_classify
+):
     is_sync = op == "get_stack_trace"
     ref_keys = len(run_results[0][reference_mode]["observations"])
     rows = {}
@@ -655,10 +271,11 @@ def print_results(case_name, run_results, modes, reference_mode, op):
         ]
         rows[mode] = {
             "samples": sum(item["samples"] for item in metrics),
-            "units": sum(item["units"] for item in metrics),
+            "stacks": sum(item["stacks"] for item in metrics),
             "empty": sum(item["empty"] for item in metrics),
             "impossible": sum(item["impossible"] for item in metrics),
             "errors": fmt_stat([item["error_percent"] for item in metrics], 2),
+            "us": fmt_stat([item["avg_us"] for item in metrics], 2),
             "impossible_pct": fmt_stat(
                 [item["impossible_percent"] for item in metrics], 2
             ),
@@ -670,20 +287,19 @@ def print_results(case_name, run_results, modes, reference_mode, op):
             else fmt_floor([item["tvd_floor"] for item in metrics]),
         }
 
-    show_units = any(row["units"] != row["samples"] for row in rows.values())
+    show_stacks = any(row["stacks"] != row["samples"] for row in rows.values())
     ordered = [reference_mode] + [m for m in modes if m != reference_mode]
 
     print(f"\n{case_name} ({op}) ref_keys={ref_keys}")
     header = [f"{'mode':<18}", f"{'samples':>9}"]
-    if show_units:
-        header.append(f"{'units':>9}")
+    if show_stacks:
+        header.append(f"{'stacks':>9}")
     if not is_sync:
         header.append(f"{'empty':>9}")
-    header += [
-        f"{'errors%':>12}",
-        f"{'impossible':>10}",
-        f"{'impossible%':>12}",
-    ]
+    header.append(f"{'µs':>12}")
+    header.append(f"{'errors%':>12}")
+    if has_classify:
+        header += [f"{'impossible':>10}", f"{'impossible%':>12}"]
     if is_sync:
         header += [f"{'tvd_excess':>12}", f"{'tvd_floor':>10}"]
     print(" ".join(header))
@@ -691,15 +307,17 @@ def print_results(case_name, run_results, modes, reference_mode, op):
     for mode in ordered:
         row = rows[mode]
         line = [f"{mode:<18}", f"{row['samples']:>9}"]
-        if show_units:
-            line.append(f"{row['units']:>9}")
+        if show_stacks:
+            line.append(f"{row['stacks']:>9}")
         if not is_sync:
             line.append(f"{row['empty']:>9}")
-        line += [
-            f"{row['errors']:>12}",
-            f"{row['impossible']:>10}",
-            f"{row['impossible_pct']:>12}",
-        ]
+        line.append(f"{row['us']:>12}")
+        line.append(f"{row['errors']:>12}")
+        if has_classify:
+            line += [
+                f"{row['impossible']:>10}",
+                f"{row['impossible_pct']:>12}",
+            ]
         if is_sync:
             line += [f"{row['tvd_excess']:>12}", f"{row['tvd_floor']:>10}"]
         print(" ".join(line))
@@ -786,7 +404,9 @@ def main():
             {mode: run_mode(case, mode, args) for mode in case_modes}
             for _ in range(args.runs)
         ]
-        print_results(name, run_results, case_modes, case_ref, op)
+        print_results(
+            name, run_results, case_modes, case_ref, op, case[1] is not None
+        )
     return 0
 
 
