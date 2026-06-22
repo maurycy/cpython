@@ -270,6 +270,7 @@ def print_results(
             for results in run_results
         ]
         rows[mode] = {
+            "mode": mode,
             "samples": sum(item["samples"] for item in metrics),
             "stacks": sum(item["stacks"] for item in metrics),
             "empty": sum(item["empty"] for item in metrics),
@@ -290,37 +291,28 @@ def print_results(
     show_stacks = any(row["stacks"] != row["samples"] for row in rows.values())
     ordered = [reference_mode] + [m for m in modes if m != reference_mode]
 
-    print(f"\n{case_name} ({op}) ref_keys={ref_keys}")
-    header = [f"{'mode':<18}", f"{'samples':>9}"]
+    columns = [("mode", "<18", "mode"), ("samples", ">9", "samples")]
     if show_stacks:
-        header.append(f"{'stacks':>9}")
+        columns.append(("stacks", ">9", "stacks"))
     if not is_sync:
-        header.append(f"{'empty':>9}")
-    header.append(f"{'µs':>12}")
-    header.append(f"{'errors%':>12}")
+        columns.append(("empty", ">9", "empty"))
+    columns += [("µs", ">12", "us"), ("errors%", ">12", "errors")]
     if has_classify:
-        header += [f"{'impossible':>10}", f"{'impossible%':>12}"]
+        columns += [
+            ("impossible", ">10", "impossible"),
+            ("impossible%", ">12", "impossible_pct"),
+        ]
     if is_sync:
-        header += [f"{'tvd_excess':>12}", f"{'tvd_floor':>10}"]
-    print(" ".join(header))
+        columns += [
+            ("tvd_excess", ">12", "tvd_excess"),
+            ("tvd_floor", ">10", "tvd_floor"),
+        ]
 
+    print(f"\n{case_name} ({op}) ref_keys={ref_keys}")
+    print(" ".join(f"{label:{spec}}" for label, spec, _ in columns))
     for mode in ordered:
         row = rows[mode]
-        line = [f"{mode:<18}", f"{row['samples']:>9}"]
-        if show_stacks:
-            line.append(f"{row['stacks']:>9}")
-        if not is_sync:
-            line.append(f"{row['empty']:>9}")
-        line.append(f"{row['us']:>12}")
-        line.append(f"{row['errors']:>12}")
-        if has_classify:
-            line += [
-                f"{row['impossible']:>10}",
-                f"{row['impossible_pct']:>12}",
-            ]
-        if is_sync:
-            line += [f"{row['tvd_excess']:>12}", f"{row['tvd_floor']:>10}"]
-        print(" ".join(line))
+        print(" ".join(f"{row[key]:{spec}}" for _, spec, key in columns))
 
 
 def parse_args():
@@ -392,12 +384,13 @@ def main():
     for name in cases:
         case = CASES[name]
         op = case[2] if len(case) > 2 else "get_stack_trace"
-        if op == "get_stack_trace":
-            case_modes = list(modes)
-            case_ref = args.reference_mode
-        else:
-            case_ref = collapse_cache(args.reference_mode)
-            case_modes = list(dict.fromkeys(collapse_cache(m) for m in modes))
+        case_ref = args.reference_mode
+        case_modes = list(modes)
+        if op != "get_stack_trace":
+            case_ref = collapse_cache(case_ref)
+            case_modes = list(
+                dict.fromkeys(collapse_cache(m) for m in case_modes)
+            )
         if case_ref not in case_modes:
             case_modes.append(case_ref)
         run_results = [
