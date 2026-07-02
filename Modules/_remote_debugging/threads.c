@@ -496,6 +496,7 @@ unwind_stack_for_thread(
 
     uintptr_t frame_addr = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.current_frame);
     uintptr_t base_frame_addr = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.base_frame);
+    uintptr_t datastack_chunk_addr = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.datastack_chunk);
 
     frame_info = PyList_New(0);
     if (!frame_info) {
@@ -506,7 +507,7 @@ unwind_stack_for_thread(
     // Cache mode skips this for full hits, but cache misses copy chunks before
     // walking so newly stored cache entries come from a stable stack snapshot.
     if (!unwinder->cache_frames) {
-        if (copy_stack_chunks(unwinder, *current_tstate, &chunks) < 0) {
+        if (copy_stack_chunks(unwinder, datastack_chunk_addr, &chunks) < 0) {
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to copy stack chunks");
             goto error;
         }
@@ -517,6 +518,7 @@ unwind_stack_for_thread(
         .frame_addr = frame_addr,
         .thread_state_addr = *current_tstate,
         .base_frame_addr = base_frame_addr,
+        .datastack_chunk_addr = datastack_chunk_addr,
         .gc_frame = gc_frame,
         .chunks = &chunks,
         .prefetch = ctx_prefetch,
