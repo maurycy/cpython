@@ -661,10 +661,6 @@ collect_frames_with_cache(
         }
     }
 
-    if (ctx->last_profiled.frame == 0) {
-        return 0;
-    }
-
     if (frame_cache_store(unwinder, thread_id, ctx->frame_info, ctx->frame_addrs,
                           ctx->num_addrs, ctx->thread_state_addr,
                           ctx->last_profiled.seq, ctx->base_frame_addr,
