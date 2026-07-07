@@ -320,10 +320,9 @@ def parse_args():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     parser.add_argument(
-        "--case",
-        choices=sorted(CASES),
+        "--snippet",
         action="append",
-        help="case to run; may be passed more than once; omit to run all cases",
+        help="snippet name or Python file; may be passed more than once",
     )
     parser.add_argument(
         "--mode",
@@ -374,7 +373,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    cases = list(args.case) if args.case else sorted(CASES)
+    cases = list(args.snippet) if args.snippet else sorted(CASES)
     modes = list(args.mode) if args.mode else sorted(MODES)
     if args.reference_mode not in modes:
         modes.append(args.reference_mode)
@@ -382,7 +381,11 @@ def main():
     print_run_info(args, cases)
 
     for name in cases:
-        case = CASES[name]
+        if name in CASES:
+            case = CASES[name]
+        else:
+            with open(name, encoding="utf-8") as file:
+                case = (file.read(), None)
         op = case[2] if len(case) > 2 else "get_stack_trace"
         case_ref = args.reference_mode
         case_modes = list(modes)
