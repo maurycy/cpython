@@ -55,12 +55,6 @@ def tvd_floor(reference_obs, n_live):
     )
 
 
-def stack_key(frames):
-    return ";".join(
-        f"{frame.funcname}:{_get_lineno(frame)}" for frame in frames
-    )
-
-
 def print_run_info(args, cases):
     print(sys.version.replace("\n", " "))
     print(
@@ -201,7 +195,12 @@ def run_mode(case, mode_name, args):
                 if impossible:
                     result["impossible"] += 1
                 else:
-                    result["observations"][stack_key(frames)] += 1
+                    result["observations"][
+                        ";".join(
+                            f"{frame.funcname}:{_get_lineno(frame)}"
+                            for frame in frames
+                        )
+                    ] += 1
     return result
 
 
