@@ -443,6 +443,14 @@ PyDoc_STRVAR(_remote_debugging_RemoteUnwinder_get_stats__doc__,
 "          batched reads\n"
 "        - batched_read_segments_completed: Segments completed by\n"
 "          batched reads\n"
+"        - alias_hits: macOS alias-cache hits\n"
+"        - alias_misses: macOS alias-cache misses\n"
+"        - alias_remap_failures: macOS remap/protect failures\n"
+"        - alias_validation_fails: macOS alias snapshot validation\n"
+"          failures\n"
+"        - alias_evictions: macOS alias-cache LRU evictions\n"
+"        - alias_probe_checks: macOS alias object identity probes\n"
+"        - alias_probe_recycles: macOS alias recycled-page detections\n"
 "        - frame_cache_hit_rate: Percentage of samples that hit the\n"
 "          cache\n"
 "        - code_object_cache_hit_rate: Percentage of code object\n"
@@ -1588,4 +1596,4 @@ skip_optional_kwonly:
 exit:
     return return_value;
 }
-/*[clinic end generated code: output=a3df14a6ab7f2998 input=a9049054013a1b77]*/
+/*[clinic end generated code: output=7ef1ecef3780b264 input=a9049054013a1b77]*/

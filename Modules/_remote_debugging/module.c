@@ -208,6 +208,29 @@ is_prerelease_version(uint64_t version)
     return (version & 0xF0) != 0xF0;
 }
 
+static void
+calculate_interp_state_window(RemoteUnwinderObject *self)
+{
+    uint64_t start = UINT64_MAX;
+    uint64_t end = 0;
+    int zero_skipped =
+        _PyRemoteDebug_InterpStateWindow(&self->debug_offsets, &start, &end);
+#ifdef Py_GIL_DISABLED
+    const int expected_zero_offsets = 0;
+#else
+    const int expected_zero_offsets = 1;
+#endif
+    start &= ~(uint64_t)7;
+    if (zero_skipped != expected_zero_offsets
+        || end > INTERP_STATE_BUFFER_SIZE || start >= end) {
+        self->interp_window_start = 0;
+        self->interp_window_size = INTERP_STATE_BUFFER_SIZE;
+        return;
+    }
+    self->interp_window_start = (size_t)start;
+    self->interp_window_size = (size_t)(end - start);
+}
+
 int
 validate_debug_offsets(struct _Py_DebugOffsets *debug_offsets)
 {
@@ -383,6 +406,24 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
         set_exception_cause(self, PyExc_RuntimeError, "Failed to initialize process handle");
         return -1;
     }
+    self->vm_max_address = 0;
+#if defined(__APPLE__) && TARGET_OS_OSX
+    _Py_RemoteDebug_AliasCacheInit(self);
+    task_vm_info_data_t vm_info;
+    mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
+    if (task_info(self->handle.task, TASK_VM_INFO,
+                  (task_info_t)&vm_info, &vm_count) == KERN_SUCCESS) {
+        if (vm_info.max_address > vm_info.min_address) {
+            self->vm_max_address = (uintptr_t)vm_info.max_address;
+        }
+        if (vm_info.page_size > 0
+            && (vm_info.page_size & (vm_info.page_size - 1)) == 0
+            && (size_t)vm_info.page_size != (size_t)self->handle.page_size) {
+            self->alias_cache.disabled = 1;
+            _Py_RemoteDebug_AliasCacheClear(self);
+        }
+    }
+#endif
 
     self->runtime_start_address = _Py_RemoteDebug_GetPyRuntimeAddress(&self->handle);
     if (self->runtime_start_address == 0) {
@@ -403,6 +444,8 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
         set_exception_cause(self, PyExc_RuntimeError, "Invalid debug offsets found");
         return -1;
     }
+
+    calculate_interp_state_window(self);
 
     // Try to read async debug offsets, but don't fail if they're not available
     self->async_debug_offsets_available = 1;
@@ -494,6 +537,7 @@ interpreter_thread_cache_index(uintptr_t interpreter_addr)
         & (INTERPRETER_THREAD_CACHE_SIZE - 1);
 }
 
+#if !(defined(__APPLE__) && TARGET_OS_OSX)
 static inline uintptr_t
 get_cached_tstate_for_interpreter(
     RemoteUnwinderObject *self,
@@ -516,6 +560,7 @@ get_cached_tstate_for_interpreter(
     }
     return 0;
 }
+#endif
 
 static inline void
 set_cached_tstate_for_interpreter(
@@ -587,9 +632,9 @@ refresh_generation_caches_for_interpreter(
     char interp_state_buffer[INTERP_STATE_BUFFER_SIZE];
     if (_Py_RemoteDebug_ReadRemoteMemory(
             &self->handle,
-            interpreter_addr,
-            INTERP_STATE_BUFFER_SIZE,
-            interp_state_buffer) < 0) {
+            interpreter_addr + self->interp_window_start,
+            self->interp_window_size,
+            interp_state_buffer + self->interp_window_start) < 0) {
         set_exception_cause(self, PyExc_RuntimeError,
                             "Failed to read interpreter state buffer");
         return -1;
@@ -609,10 +654,25 @@ read_interp_state_and_maybe_thread_frame(
 {
     prefetch->tstate = NULL;
     prefetch->frame = NULL;
+    size_t iw_start = unwinder->interp_window_start;
+    size_t iw_size = unwinder->interp_window_size;
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (unwinder->cache_frames) {
+        if (_Py_RemoteDebug_AliasedRead(
+                unwinder,
+                interpreter_addr + iw_start,
+                iw_size,
+                interp_state_buffer + iw_start) < 0) {
+            return -1;
+        }
+        return 0;
+    }
+#endif
     if (prefetch->tstate_addr != 0) {
         size_t tstate_size = (size_t)unwinder->debug_offsets.thread_state.size;
         _Py_RemoteReadSegment segments[3] = {
-            {interpreter_addr, interp_state_buffer, INTERP_STATE_BUFFER_SIZE},
+            {interpreter_addr + iw_start, interp_state_buffer + iw_start,
+             iw_size},
             {prefetch->tstate_addr, tstate_buffer, tstate_size},
             {prefetch->frame_addr, frame_buffer, SIZEOF_INTERP_FRAME},
         };
@@ -620,9 +680,9 @@ read_interp_state_and_maybe_thread_frame(
         Py_ssize_t nread = _Py_RemoteDebug_BatchedReadRemoteMemory(
             &unwinder->handle, segments, nsegs);
         int completed = 0;
-        if (nread >= (Py_ssize_t)INTERP_STATE_BUFFER_SIZE) {
+        if (nread >= (Py_ssize_t)iw_size) {
             completed = 1;
-            Py_ssize_t with_tstate = (Py_ssize_t)INTERP_STATE_BUFFER_SIZE
+            Py_ssize_t with_tstate = (Py_ssize_t)iw_size
                 + (Py_ssize_t)tstate_size;
             if (nread >= with_tstate) {
                 completed = 2;
@@ -645,9 +705,9 @@ read_interp_state_and_maybe_thread_frame(
     }
     return _Py_RemoteDebug_ReadRemoteMemory(
         &unwinder->handle,
-        interpreter_addr,
-        INTERP_STATE_BUFFER_SIZE,
-        interp_state_buffer);
+        interpreter_addr + iw_start,
+        iw_size,
+        interp_state_buffer + iw_start);
 }
 
 /*[clinic input]
@@ -723,6 +783,7 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
         char prefetched_tstate[SIZEOF_THREAD_STATE];
         char prefetched_frame[SIZEOF_INTERP_FRAME];
         RemoteReadPrefetch prefetch = {0};
+#if !(defined(__APPLE__) && TARGET_OS_OSX)
         if (self->cache_frames) {
             prefetch.tstate_addr = get_cached_tstate_for_interpreter(
                 self, current_interpreter);
@@ -733,6 +794,7 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
                 prefetch.frame_addr = entry->addrs[0];
             }
         }
+#endif
 
         if (read_interp_state_and_maybe_thread_frame(
                 self,
@@ -802,7 +864,9 @@ _remote_debugging_RemoteUnwinder_get_stack_trace_impl(RemoteUnwinderObject *self
 
         while (current_tstate != 0) {
             uintptr_t prev_tstate = current_tstate;
-            PyObject* frame_info = unwind_stack_for_thread(self, &current_tstate,
+            PyObject* frame_info = unwind_stack_for_thread(self,
+                                                           current_interpreter,
+                                                           &current_tstate,
                                                            gil_holder_tstate,
                                                            gc_frame,
                                                            main_thread_tstate,
@@ -1113,6 +1177,14 @@ Returns:
           batched reads
         - batched_read_segments_completed: Segments completed by
           batched reads
+        - alias_hits: macOS alias-cache hits
+        - alias_misses: macOS alias-cache misses
+        - alias_remap_failures: macOS remap/protect failures
+        - alias_validation_fails: macOS alias snapshot validation
+          failures
+        - alias_evictions: macOS alias-cache LRU evictions
+        - alias_probe_checks: macOS alias object identity probes
+        - alias_probe_recycles: macOS alias recycled-page detections
         - frame_cache_hit_rate: Percentage of samples that hit the
           cache
         - code_object_cache_hit_rate: Percentage of code object
@@ -1128,7 +1200,7 @@ Raises:
 
 static PyObject *
 _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
-/*[clinic end generated code: output=21e36477122be2a0 input=87905c65038fb06e]*/
+/*[clinic end generated code: output=21e36477122be2a0 input=913e10ed7cabd40d]*/
 {
     if (!self->collect_stats) {
         PyErr_SetString(PyExc_RuntimeError,
@@ -1168,6 +1240,13 @@ _remote_debugging_RemoteUnwinder_get_stats_impl(RemoteUnwinderObject *self)
     ADD_STAT(batched_read_misses);
     ADD_STAT(batched_read_segments_requested);
     ADD_STAT(batched_read_segments_completed);
+    ADD_STAT(alias_hits);
+    ADD_STAT(alias_misses);
+    ADD_STAT(alias_remap_failures);
+    ADD_STAT(alias_validation_fails);
+    ADD_STAT(alias_evictions);
+    ADD_STAT(alias_probe_checks);
+    ADD_STAT(alias_probe_recycles);
 
 #undef ADD_STAT
 
@@ -1334,6 +1413,9 @@ RemoteUnwinder_dealloc(PyObject *op)
     if (self->tlbc_cache) {
         _Py_hashtable_destroy(self->tlbc_cache);
     }
+#endif
+#if defined(__APPLE__) && TARGET_OS_OSX
+    _Py_RemoteDebug_AliasCacheClear(self);
 #endif
     if (self->handle.pid != 0) {
         _Py_RemoteDebug_ClearCache(&self->handle);
