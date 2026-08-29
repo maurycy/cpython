@@ -307,10 +307,10 @@ parse_frame_from_chunks(
 
 #define CALLABLE_HEADER_SIZE \
     (offsetof(PyWrapperDescrObject, d_base) + sizeof(void *))
-_Static_assert(offsetof(PyCFunctionObject, m_module) + sizeof(void *) <=
+static_assert(offsetof(PyCFunctionObject, m_module) + sizeof(void *) <=
                    CALLABLE_HEADER_SIZE,
                "PyCFunctionObject fields must fit in the callable header");
-_Static_assert(offsetof(PyMethodDescrObject, d_method) + sizeof(void *) <=
+static_assert(offsetof(PyMethodDescrObject, d_method) + sizeof(void *) <=
                    CALLABLE_HEADER_SIZE,
                "PyMethodDescrObject fields must fit in the callable header");
 
