@@ -553,6 +553,25 @@ unwind_stack_for_thread(
 
     *current_tstate = GET_MEMBER(uintptr_t, ts, unwinder->debug_offsets.thread_state.next);
 
+    if (unwinder->native
+        && frame_addr != 0
+        && PyList_GET_SIZE(frame_info) > 0)
+    {
+        PyObject *leaf = read_native_callable_frame(
+            unwinder, frame_addr, &ctx);
+        if (leaf != NULL) {
+            Py_ssize_t pos = (unwinder->gc && gc_frame == frame_addr) ? 1 : 0;
+            int rc = PyList_Insert(frame_info, pos, leaf);
+            Py_DECREF(leaf);
+            if (rc < 0) {
+                set_exception_cause(
+                    unwinder, PyExc_RuntimeError,
+                    "Failed to insert native leaf frame");
+                goto error;
+            }
+        }
+    }
+
     if (unwinder->cache_frames) {
         FrameCacheEntry *entry = frame_cache_find(unwinder, (uint64_t)tid);
         if (entry && entry->thread_id_obj) {
