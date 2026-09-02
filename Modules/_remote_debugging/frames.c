@@ -6,6 +6,8 @@
  ******************************************************************************/
 
 #include "_remote_debugging.h"
+#include "internal/pycore_opcode_metadata.h"
+#include "opcode_ids.h"
 
 /* ============================================================================
  * STACK CHUNK MANAGEMENT FUNCTIONS
@@ -139,7 +141,7 @@ error:
 }
 
 void *
-find_frame_in_chunks(StackChunkList *chunks, uintptr_t remote_ptr)
+find_frame_in_chunks(StackChunkList *chunks, uintptr_t remote_ptr, size_t size)
 {
     for (size_t i = 0; i < chunks->count; ++i) {
         // Validate size: reject garbage that would cause underflow
@@ -150,10 +152,11 @@ find_frame_in_chunks(StackChunkList *chunks, uintptr_t remote_ptr)
         uintptr_t base = chunks->chunks[i].remote_addr + offsetof(_PyStackChunk, data);
         size_t payload = chunks->chunks[i].size - offsetof(_PyStackChunk, data);
 
-        if (payload >= SIZEOF_INTERP_FRAME &&
+        if (payload >= size &&
                 remote_ptr >= base &&
-                remote_ptr <= base + payload - SIZEOF_INTERP_FRAME) {
-            return (char *)chunks->chunks[i].local_copy + (remote_ptr - chunks->chunks[i].remote_addr);
+                remote_ptr <= base + payload - size) {
+            return (char *)chunks->chunks[i].local_copy
+                + (remote_ptr - chunks->chunks[i].remote_addr);
         }
     }
     return NULL;
@@ -259,7 +262,8 @@ parse_frame_from_chunks(
     uintptr_t *stackpointer,
     StackChunkList *chunks
 ) {
-    void *frame_ptr = find_frame_in_chunks(chunks, address);
+    void *frame_ptr = find_frame_in_chunks(
+        chunks, address, SIZEOF_INTERP_FRAME);
     if (!frame_ptr) {
         PyErr_Format(PyExc_RuntimeError, "Frame at address 0x%lx not found in stack chunks", address);
         set_exception_cause(unwinder, PyExc_RuntimeError, "Frame not found in stack chunks");
@@ -291,6 +295,392 @@ parse_frame_from_chunks(
         .tlbc_index = tlbc_index,
     };
     return parse_code_object(unwinder, result, &code_ctx);
+}
+
+
+/* ============================================================================
+ * NATIVE CALLABLE RESOLUTION
+ * ============================================================================ */
+
+#define NATIVE_NAME_MAX 128
+#define NATIVE_FRAME_CACHE_MAX_ENTRIES 4096
+
+#define CALLABLE_HEADER_SIZE \
+    (offsetof(PyWrapperDescrObject, d_base) + sizeof(void *))
+static_assert(offsetof(PyCFunctionObject, m_module) + sizeof(void *) <=
+                   CALLABLE_HEADER_SIZE,
+               "PyCFunctionObject fields must fit in the callable header");
+static_assert(offsetof(PyMethodDescrObject, d_method) + sizeof(void *) <=
+                   CALLABLE_HEADER_SIZE,
+               "PyMethodDescrObject fields must fit in the callable header");
+
+typedef struct {
+    char header[CALLABLE_HEADER_SIZE];
+    PyObject *frame;
+} CachedNativeFrame;
+
+static void
+cached_native_frame_destroy(void *ptr)
+{
+    CachedNativeFrame *entry = (CachedNativeFrame *)ptr;
+    Py_XDECREF(entry->frame);
+    PyMem_RawFree(entry);
+}
+
+static _Py_hashtable_t *
+get_or_create_native_frame_cache(RemoteUnwinderObject *unwinder)
+{
+    if (unwinder->native_frame_cache == NULL) {
+        unwinder->native_frame_cache = _Py_hashtable_new_full(
+            _Py_hashtable_hash_ptr,
+            _Py_hashtable_compare_direct,
+            NULL,
+            cached_native_frame_destroy,
+            NULL);
+        if (unwinder->native_frame_cache == NULL) {
+            PyErr_Clear();
+        }
+    }
+    return unwinder->native_frame_cache;
+}
+
+static int
+read_c_string(RemoteUnwinderObject *unwinder, uintptr_t address,
+              char *buf, size_t maxlen)
+{
+    size_t got = 0;
+    size_t page_size = (size_t)unwinder->handle.page_size;
+    while (got + 1 < maxlen) {
+        uintptr_t current = address + got;
+        size_t chunk = page_size - current % page_size;
+        if (chunk > maxlen - 1 - got) {
+            chunk = maxlen - 1 - got;
+        }
+        if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, current,
+                                                  chunk, buf + got) < 0) {
+            return -1;
+        }
+        if (memchr(buf + got, '\0', chunk) != NULL) {
+            return 0;
+        }
+        got += chunk;
+    }
+    buf[maxlen - 1] = '\0';
+    return 0;
+}
+
+static int
+read_type_name(RemoteUnwinderObject *unwinder, uintptr_t type_addr,
+               char *buf, size_t maxlen)
+{
+    uintptr_t name_ptr = 0;
+    uintptr_t addr = type_addr
+        + (uintptr_t)unwinder->debug_offsets.type_object.tp_name;
+    if (read_ptr(unwinder, addr, &name_ptr) < 0 || name_ptr == 0) {
+        return -1;
+    }
+    return read_c_string(unwinder, name_ptr, buf, maxlen);
+}
+
+static int
+read_object_type_name(RemoteUnwinderObject *unwinder, uintptr_t obj,
+                      char *buf, size_t maxlen)
+{
+    uintptr_t type_addr = 0;
+    uintptr_t addr = obj + (uintptr_t)unwinder->debug_offsets.pyobject.ob_type;
+    if (read_ptr(unwinder, addr, &type_addr) < 0 || type_addr == 0) {
+        return -1;
+    }
+    return read_type_name(unwinder, type_addr, buf, maxlen);
+}
+
+static PyObject *
+builtin_function_name(RemoteUnwinderObject *unwinder, const char *header)
+{
+    uintptr_t method_def = GET_MEMBER(
+        uintptr_t, header, offsetof(PyCFunctionObject, m_ml));
+    uintptr_t name_ptr = 0;
+    char name[NATIVE_NAME_MAX];
+    if (method_def == 0
+        || read_ptr(unwinder, method_def + offsetof(PyMethodDef, ml_name),
+                    &name_ptr) < 0
+        || name_ptr == 0
+        || read_c_string(unwinder, name_ptr, name, sizeof(name)) < 0) {
+        return NULL;
+    }
+
+    uintptr_t self = GET_MEMBER(
+        uintptr_t, header, offsetof(PyCFunctionObject, m_self));
+    if (self != 0) {
+        char self_type[NATIVE_NAME_MAX];
+        if (read_object_type_name(
+                unwinder, self, self_type, sizeof(self_type)) < 0) {
+            return NULL;
+        }
+        if (strcmp(self_type, "type") == 0
+            && read_type_name(
+                unwinder, self, self_type, sizeof(self_type)) < 0) {
+            return NULL;
+        }
+        if (strcmp(self_type, "module") != 0) {
+            return PyUnicode_FromFormat("%s.%s", self_type, name);
+        }
+    }
+
+    uintptr_t module = GET_MEMBER(
+        uintptr_t, header, offsetof(PyCFunctionObject, m_module));
+    if (module != 0) {
+        char module_type[NATIVE_NAME_MAX];
+        if (read_object_type_name(
+                unwinder, module, module_type, sizeof(module_type)) < 0) {
+            return NULL;
+        }
+        if (strcmp(module_type, "str") == 0) {
+            PyObject *module_name = read_py_str(
+                unwinder, module, NATIVE_NAME_MAX);
+            if (module_name == NULL) {
+                return NULL;
+            }
+            if (PyUnicode_CompareWithASCIIString(
+                    module_name, "builtins") == 0) {
+                Py_DECREF(module_name);
+                return PyUnicode_FromString(name);
+            }
+            PyObject *result = PyUnicode_FromFormat(
+                "%U.%s", module_name, name);
+            Py_DECREF(module_name);
+            return result;
+        }
+    }
+    return PyUnicode_FromString(name);
+}
+
+static PyObject *
+descriptor_name(RemoteUnwinderObject *unwinder, const char *header)
+{
+    uintptr_t owner_type = GET_MEMBER(
+        uintptr_t, header, offsetof(PyDescrObject, d_type));
+    char owner[NATIVE_NAME_MAX];
+    if (owner_type == 0
+        || read_type_name(
+            unwinder, owner_type, owner, sizeof(owner)) < 0) {
+        return NULL;
+    }
+
+    uintptr_t name_addr = GET_MEMBER(
+        uintptr_t, header, offsetof(PyDescrObject, d_name));
+    if (name_addr == 0) {
+        return NULL;
+    }
+    PyObject *name = read_py_str(unwinder, name_addr, NATIVE_NAME_MAX);
+    if (name == NULL) {
+        return NULL;
+    }
+    PyObject *result = PyUnicode_FromFormat("%s.%U", owner, name);
+    Py_DECREF(name);
+    return result;
+}
+
+static PyObject *
+static_type_name(RemoteUnwinderObject *unwinder, uintptr_t type_addr)
+{
+    unsigned long flags = 0;
+    uintptr_t addr = type_addr
+        + (uintptr_t)unwinder->debug_offsets.type_object.tp_flags;
+    if (_Py_RemoteDebug_PagedReadRemoteMemory(
+            &unwinder->handle, addr, sizeof(flags), &flags) < 0) {
+        return NULL;
+    }
+    if (flags & Py_TPFLAGS_HEAPTYPE) {
+        return Py_NewRef(Py_None);
+    }
+    char name[NATIVE_NAME_MAX];
+    if (read_type_name(unwinder, type_addr, name, sizeof(name)) < 0) {
+        return NULL;
+    }
+    return PyUnicode_FromString(name);
+}
+
+static PyObject *
+resolve_callable_name(RemoteUnwinderObject *unwinder, uintptr_t obj,
+                      const char *header, uintptr_t type_addr)
+{
+    char type_name[NATIVE_NAME_MAX];
+    if (read_type_name(
+            unwinder, type_addr, type_name, sizeof(type_name)) < 0) {
+        return NULL;
+    }
+    if (strcmp(type_name, "builtin_function_or_method") == 0
+        || strcmp(type_name, "builtin_method") == 0) {
+        return builtin_function_name(unwinder, header);
+    }
+    if (strcmp(type_name, "method_descriptor") == 0
+        || strcmp(type_name, "classmethod_descriptor") == 0
+        || strcmp(type_name, "wrapper_descriptor") == 0) {
+        return descriptor_name(unwinder, header);
+    }
+    if (strcmp(type_name, "type") == 0) {
+        return static_type_name(unwinder, obj);
+    }
+    return Py_NewRef(Py_None);
+}
+
+static PyObject *
+resolve_native_callable_frame(RemoteUnwinderObject *unwinder, uintptr_t obj)
+{
+    char header[CALLABLE_HEADER_SIZE];
+    if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, obj,
+                                              sizeof(header), header) < 0) {
+        return NULL;
+    }
+    size_t type_offset = unwinder->debug_offsets.pyobject.ob_type;
+    if (type_offset > sizeof(header) - sizeof(uintptr_t)) {
+        return NULL;
+    }
+
+    _Py_hashtable_t *cache = get_or_create_native_frame_cache(unwinder);
+    if (cache != NULL) {
+        CachedNativeFrame *entry = _Py_hashtable_get(cache, (void *)obj);
+        if (entry != NULL) {
+            size_t size = entry->frame != NULL
+                ? sizeof(header) - type_offset
+                : sizeof(uintptr_t);
+            if (memcmp(entry->header + type_offset,
+                       header + type_offset, size) == 0) {
+                return Py_XNewRef(entry->frame);
+            }
+            entry = _Py_hashtable_steal(cache, (void *)obj);
+            cached_native_frame_destroy(entry);
+        }
+    }
+
+    uintptr_t type_addr = GET_MEMBER(uintptr_t, header, type_offset);
+    if (type_addr == 0) {
+        return NULL;
+    }
+    PyObject *name = resolve_callable_name(unwinder, obj, header, type_addr);
+    if (name == NULL) {
+        return NULL;
+    }
+    PyObject *frame = NULL;
+    if (name != Py_None) {
+        frame = make_frame_info(
+            unwinder, _Py_LATIN1_CHR('~'), Py_None, name, Py_None);
+        if (frame == NULL) {
+            Py_DECREF(name);
+            return NULL;
+        }
+    }
+    Py_DECREF(name);
+
+    if (cache == NULL) {
+        return frame;
+    }
+    if (_Py_hashtable_len(cache) >= NATIVE_FRAME_CACHE_MAX_ENTRIES) {
+        _Py_hashtable_clear(cache);
+    }
+    CachedNativeFrame *entry = PyMem_RawMalloc(sizeof(CachedNativeFrame));
+    if (entry == NULL) {
+        return frame;
+    }
+    memcpy(entry->header, header, sizeof(header));
+    entry->frame = Py_XNewRef(frame);
+    if (_Py_hashtable_set(cache, (void *)obj, entry) < 0) {
+        cached_native_frame_destroy(entry);
+    }
+    return frame;
+}
+
+PyObject *
+read_native_callable_frame(
+    RemoteUnwinderObject *unwinder,
+    uintptr_t frame_addr,
+    const FrameWalkContext *ctx)
+{
+    char local_frame[SIZEOF_INTERP_FRAME];
+    const char *frame = NULL;
+    if (ctx->prefetch.frame && ctx->prefetch.frame_addr == frame_addr) {
+        frame = ctx->prefetch.frame;
+    }
+    if (frame == NULL && ctx->chunks != NULL && ctx->chunks->count > 0) {
+        frame = find_frame_in_chunks(
+            ctx->chunks, frame_addr, SIZEOF_INTERP_FRAME);
+    }
+    if (frame == NULL) {
+        if (_Py_RemoteDebug_PagedReadRemoteMemory(
+                &unwinder->handle, frame_addr,
+                SIZEOF_INTERP_FRAME, local_frame) < 0) {
+            goto fail;
+        }
+        frame = local_frame;
+    }
+
+    char owner = GET_MEMBER(
+        char, frame, unwinder->debug_offsets.interpreter_frame.owner);
+    if (owner != FRAME_OWNED_BY_THREAD && owner != FRAME_OWNED_BY_GENERATOR) {
+        return NULL;
+    }
+    uintptr_t instr_ptr = GET_MEMBER(
+        uintptr_t, frame,
+        unwinder->debug_offsets.interpreter_frame.instr_ptr);
+    uintptr_t stackpointer = GET_MEMBER(
+        uintptr_t, frame,
+        unwinder->debug_offsets.interpreter_frame.stackpointer);
+    if (instr_ptr == 0 || stackpointer == 0) {
+        return NULL;
+    }
+
+    _Py_CODEUNIT unit;
+    if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, instr_ptr,
+                                              sizeof(unit), &unit) < 0) {
+        goto fail;
+    }
+    int opcode = unit.op.code;
+    int oparg = unit.op.arg;
+
+    Py_ssize_t depth;
+    switch (_PyOpcode_Deopt[opcode]) {
+        case CALL:
+            depth = 2 + oparg;
+            break;
+        case CALL_KW:
+            depth = 3 + oparg;
+            break;
+        case CALL_FUNCTION_EX:
+            depth = 4;
+            break;
+        default:
+            return NULL;
+    }
+
+    uintptr_t ref;
+    uintptr_t slot_addr = stackpointer - depth * sizeof(_PyStackRef);
+    void *slot = ctx->chunks != NULL
+        ? find_frame_in_chunks(ctx->chunks, slot_addr, sizeof(ref))
+        : NULL;
+    if (slot != NULL) {
+        memcpy(&ref, slot, sizeof(ref));
+    }
+    else if (_Py_RemoteDebug_PagedReadRemoteMemory(
+                 &unwinder->handle, slot_addr, sizeof(ref), &ref) < 0) {
+        goto fail;
+    }
+    if ((ref & Py_TAG_BITS) == Py_INT_TAG) {
+        return NULL;
+    }
+    uintptr_t obj = CLEAR_PTR_TAG(ref);
+    if (obj == 0) {
+        return NULL;
+    }
+    PyObject *native_frame = resolve_native_callable_frame(unwinder, obj);
+    if (native_frame == NULL) {
+        goto fail;
+    }
+    return native_frame;
+
+fail:
+    PyErr_Clear();
+    return NULL;
 }
 
 /* ============================================================================
@@ -363,26 +753,35 @@ parsed_frame:
             PyErr_SetString(PyExc_RuntimeError, e);
             return -1;
         }
-        PyObject *extra_frame = NULL;
+        PyObject *extra_frame_info = NULL;
         if (unwinder->gc && frame_addr == ctx->gc_frame) {
             _Py_DECLARE_STR(gc, "<GC>");
-            extra_frame = &_Py_STR(gc);
+            extra_frame_info = make_frame_info(
+                unwinder, _Py_LATIN1_CHR('~'), Py_None, &_Py_STR(gc), Py_None);
+            if (extra_frame_info == NULL) {
+                Py_XDECREF(frame);
+                return -1;
+            }
         }
         else if (unwinder->native &&
                  frame == NULL &&
                  next_frame_addr &&
                  !(unwinder->gc && next_frame_addr == ctx->gc_frame))
         {
-            _Py_DECLARE_STR(native, "<native>");
-            extra_frame = &_Py_STR(native);
-        }
-        if (extra_frame) {
-            PyObject *extra_frame_info = make_frame_info(
-                unwinder, _Py_LATIN1_CHR('~'), Py_None, extra_frame, Py_None);
+            extra_frame_info = read_native_callable_frame(
+                unwinder, next_frame_addr, ctx);
             if (extra_frame_info == NULL) {
-                Py_XDECREF(frame);
-                return -1;
+                _Py_DECLARE_STR(native, "<native>");
+                extra_frame_info = make_frame_info(
+                    unwinder, _Py_LATIN1_CHR('~'), Py_None,
+                    &_Py_STR(native), Py_None);
+                if (extra_frame_info == NULL) {
+                    Py_XDECREF(frame);
+                    return -1;
+                }
             }
+        }
+        if (extra_frame_info != NULL) {
             if (PyList_Append(ctx->frame_info, extra_frame_info) < 0) {
                 Py_DECREF(extra_frame_info);
                 Py_XDECREF(frame);

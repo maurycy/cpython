@@ -186,6 +186,53 @@ while True:
         # Native frames should NOT be present:
         self.assertNotIn("<native>", output)
 
+    def test_native_frames_named(self):
+        """Test that native frames are named after the C callable when known."""
+        script = """
+import time
+
+def cb(x):
+    time.sleep(0.01)
+    return x
+
+_test_sock.sendall(b"working")
+while True:
+    sorted([2, 1], key=cb)
+"""
+        collapsed_file = tempfile.NamedTemporaryFile(
+            suffix=".txt", delete=False
+        )
+        self.addCleanup(close_and_unlink, collapsed_file)
+
+        with test_subprocess(script, wait_for_working=True) as subproc:
+            with (
+                io.StringIO() as captured_output,
+                mock.patch("sys.stdout", captured_output),
+            ):
+                collector = CollapsedStackCollector(1000, skip_idle=False)
+                profiling.sampling.sample.sample(
+                    subproc.process.pid,
+                    collector,
+                    duration_sec=1,
+                    native=True,
+                )
+                collector.export(collapsed_file.name)
+
+            with open(collapsed_file.name, "r") as f:
+                content = f.read()
+
+        stacks = [line.rsplit(" ", 1)[0] for line in content.strip().split("\n")]
+
+        # The C function that called back into Python names the marker and the
+        # innermost C call is a leaf frame:
+        self.assertTrue(
+            any(
+                ";sorted;" in stack and stack.endswith(";time.sleep")
+                for stack in stacks
+            ),
+            stacks,
+        )
+
 
 @requires_remote_subprocess_debugging()
 class TestProcessPoolExecutorSupport(unittest.TestCase):
