@@ -112,6 +112,39 @@ ensure_async_debug_offsets(RemoteUnwinderObject *unwinder)
     return 0;
 }
 
+static int
+buffer_covers_span(uint64_t offset, size_t width, size_t buffer_size)
+{
+    return offset <= (uint64_t)buffer_size && width <= buffer_size - (size_t)offset;
+}
+
+static int
+gen_object_covers_iframe(RemoteUnwinderObject *unwinder)
+{
+    return buffer_covers_span(unwinder->debug_offsets.gen_object.gi_iframe,
+                             SIZEOF_INTERP_FRAME, SIZEOF_GEN_OBJ);
+}
+
+static int
+read_task_object(RemoteUnwinderObject *unwinder,
+                 uintptr_t task_address,
+                 char *task_obj,
+                 const char *error_msg)
+{
+    size_t task_size = (size_t)unwinder->async_debug_offsets.asyncio_task_object.size;
+    if (task_size > SIZEOF_TASK_OBJ) {
+        PyErr_SetString(PyExc_RuntimeError, "Invalid asyncio task object size");
+        set_exception_cause(unwinder, PyExc_RuntimeError, "Asyncio task object size exceeds local buffer");
+        return -1;
+    }
+    if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, task_address,
+                                              task_size, task_obj) < 0) {
+        set_exception_cause(unwinder, PyExc_RuntimeError, error_msg);
+        return -1;
+    }
+    return 0;
+}
+
 /* ============================================================================
  * SET ITERATION FUNCTIONS
  * ============================================================================ */
@@ -178,28 +211,16 @@ iterate_set_entries(
  * TASK NAME PARSING
  * ============================================================================ */
 
-PyObject *
-parse_task_name(
+static PyObject *
+parse_task_name_from_buffer(
     RemoteUnwinderObject *unwinder,
-    uintptr_t task_address
+    const char *task_obj
 ) {
-    // Read the entire TaskObj at once
-    char task_obj[SIZEOF_TASK_OBJ];
-    int err = _Py_RemoteDebug_PagedReadRemoteMemory(
-        &unwinder->handle,
-        task_address,
-        (size_t)unwinder->async_debug_offsets.asyncio_task_object.size,
-        task_obj);
-    if (err < 0) {
-        set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read task object");
-        return NULL;
-    }
-
     uintptr_t task_name_addr = GET_MEMBER_NO_TAG(uintptr_t, task_obj, unwinder->async_debug_offsets.asyncio_task_object.task_name);
 
     // The task name can be a long or a string so we need to check the type
     char task_name_obj[SIZEOF_PYOBJECT];
-    err = _Py_RemoteDebug_PagedReadRemoteMemory(
+    int err = _Py_RemoteDebug_PagedReadRemoteMemory(
         &unwinder->handle,
         task_name_addr,
         SIZEOF_PYOBJECT,
@@ -250,22 +271,10 @@ parse_task_name(
 static int
 handle_yield_from_frame(
     RemoteUnwinderObject *unwinder,
-    uintptr_t gi_iframe_addr,
+    const char *iframe,
     uintptr_t gen_type_addr,
     PyObject *render_to
 ) {
-    // Read the entire interpreter frame at once
-    char iframe[SIZEOF_INTERP_FRAME];
-    int err = _Py_RemoteDebug_PagedReadRemoteMemory(
-        &unwinder->handle,
-        gi_iframe_addr,
-        SIZEOF_INTERP_FRAME,
-        iframe);
-    if (err < 0) {
-        set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read interpreter frame in yield_from handler");
-        return -1;
-    }
-
     if (GET_MEMBER(char, iframe, unwinder->debug_offsets.interpreter_frame.owner) != FRAME_OWNED_BY_GENERATOR) {
         PyErr_SetString(
             PyExc_RuntimeError,
@@ -278,7 +287,7 @@ handle_yield_from_frame(
 
     if ((void*)stackpointer_addr != NULL) {
         uintptr_t gi_await_addr;
-        err = read_py_ptr(
+        int err = read_py_ptr(
             unwinder,
             stackpointer_addr - sizeof(void*) * 2,
             &gi_await_addr);
@@ -350,11 +359,31 @@ parse_coro_chain(
 
     PyObject* name = NULL;
 
-    // Parse the previous frame using the gi_iframe from local copy
+    const char *iframe = NULL;
+    char iframe_buffer[SIZEOF_INTERP_FRAME];
     uintptr_t prev_frame;
     uintptr_t gi_iframe_addr = coro_address + (uintptr_t)unwinder->debug_offsets.gen_object.gi_iframe;
     uintptr_t address_of_code_object = 0;
-    if (parse_frame_object(unwinder, &name, gi_iframe_addr, &address_of_code_object, &prev_frame) < 0) {
+
+    if (gen_object_covers_iframe(unwinder)) {
+        iframe = gen_object + (uintptr_t)unwinder->debug_offsets.gen_object.gi_iframe;
+    }
+    else {
+        Py_ssize_t bytes_read = _Py_RemoteDebug_ReadRemoteMemory(
+            &unwinder->handle,
+            gi_iframe_addr,
+            SIZEOF_INTERP_FRAME,
+            iframe_buffer);
+        if (bytes_read < 0) {
+            set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read interpreter frame in coro chain");
+            return -1;
+        }
+        STATS_INC(unwinder, memory_reads);
+        STATS_ADD(unwinder, memory_bytes_read, SIZEOF_INTERP_FRAME);
+        iframe = iframe_buffer;
+    }
+
+    if (parse_frame_buffer(unwinder, &name, iframe, &address_of_code_object, &prev_frame) < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to parse frame object in coro chain");
         return -1;
     }
@@ -371,7 +400,7 @@ parse_coro_chain(
     Py_DECREF(name);
 
     if (frame_state == FRAME_SUSPENDED_YIELD_FROM) {
-        return handle_yield_from_frame(unwinder, gi_iframe_addr, gen_type_addr, render_to);
+        return handle_yield_from_frame(unwinder, iframe, gen_type_addr, render_to);
     }
 
     return 0;
@@ -382,14 +411,14 @@ parse_coro_chain(
  * ============================================================================ */
 
 static PyObject*
-create_task_result(
+create_task_result_from_buffer(
     RemoteUnwinderObject *unwinder,
-    uintptr_t task_address
+    uintptr_t task_address,
+    const char *task_obj
 ) {
     PyObject* result = NULL;
     PyObject *call_stack = NULL;
     PyObject *tn = NULL;
-    char task_obj[SIZEOF_TASK_OBJ];
     uintptr_t coro_addr;
 
     // Create call_stack first since it's the first tuple element
@@ -403,14 +432,6 @@ create_task_result(
     tn = PyLong_FromUnsignedLongLong(task_address);
     if (tn == NULL) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to create task name/address");
-        goto error;
-    }
-
-    // Parse coroutine chain
-    if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, task_address,
-                                              (size_t)unwinder->async_debug_offsets.asyncio_task_object.size,
-                                              task_obj) < 0) {
-        set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read task object for coro chain");
         goto error;
     }
 
@@ -449,27 +470,20 @@ error:
     return NULL;
 }
 
-int
-parse_task(
+static int
+parse_task_from_buffer(
     RemoteUnwinderObject *unwinder,
     uintptr_t task_address,
+    const char *task_obj,
     PyObject *render_to
 ) {
     char is_task;
     PyObject* result = NULL;
-    int err;
 
-    err = read_char(
-        unwinder,
-        task_address + (uintptr_t)unwinder->async_debug_offsets.asyncio_task_object.task_is_task,
-        &is_task);
-    if (err) {
-        set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read is_task flag");
-        goto error;
-    }
+    is_task = GET_MEMBER(char, task_obj, unwinder->async_debug_offsets.asyncio_task_object.task_is_task);
 
     if (is_task) {
-        result = create_task_result(unwinder, task_address);
+        result = create_task_result_from_buffer(unwinder, task_address, task_obj);
         if (!result) {
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to create task result");
             goto error;
@@ -509,6 +523,20 @@ error:
     return -1;
 }
 
+int
+parse_task(
+    RemoteUnwinderObject *unwinder,
+    uintptr_t task_address,
+    PyObject *render_to
+) {
+    char task_obj[SIZEOF_TASK_OBJ];
+    if (read_task_object(unwinder, task_address, task_obj,
+                         "Failed to read task object") < 0) {
+        return -1;
+    }
+    return parse_task_from_buffer(unwinder, task_address, task_obj, render_to);
+}
+
 /* ============================================================================
  * TASK AWAITED_BY PROCESSING
  * ============================================================================ */
@@ -528,30 +556,12 @@ process_task_parser(
 }
 
 static int
-parse_task_awaited_by(
+process_task_awaited_by_from_buffer(
     RemoteUnwinderObject *unwinder,
-    uintptr_t task_address,
-    PyObject *awaited_by
-) {
-    return process_task_awaited_by(unwinder, task_address, process_task_parser, awaited_by);
-}
-
-int
-process_task_awaited_by(
-    RemoteUnwinderObject *unwinder,
-    uintptr_t task_address,
+    const char *task_obj,
     set_entry_processor_func processor,
     void *context
 ) {
-    // Read the entire TaskObj at once
-    char task_obj[SIZEOF_TASK_OBJ];
-    if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, task_address,
-                                              (size_t)unwinder->async_debug_offsets.asyncio_task_object.size,
-                                              task_obj) < 0) {
-        set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read task object");
-        return -1;
-    }
-
     uintptr_t task_ab_addr = GET_MEMBER_NO_TAG(uintptr_t, task_obj, unwinder->async_debug_offsets.asyncio_task_object.task_awaited_by);
     if ((void*)task_ab_addr == NULL) {
         return 0;  // No tasks waiting for this one
@@ -568,9 +578,26 @@ process_task_awaited_by(
 }
 
 int
-process_single_task_node(
+process_task_awaited_by(
+    RemoteUnwinderObject *unwinder,
+    uintptr_t task_address,
+    set_entry_processor_func processor,
+    void *context
+) {
+    char task_obj[SIZEOF_TASK_OBJ];
+    if (read_task_object(unwinder, task_address, task_obj,
+                         "Failed to read task object") < 0) {
+        return -1;
+    }
+    return process_task_awaited_by_from_buffer(unwinder, task_obj,
+                                               processor, context);
+}
+
+static int
+process_single_task_node_from_buffer(
     RemoteUnwinderObject *unwinder,
     uintptr_t task_addr,
+    const char *task_obj,
     PyObject **task_info,
     PyObject *result
 ) {
@@ -580,7 +607,7 @@ process_single_task_node(
     PyObject *result_item = NULL;
     PyObject *coroutine_stack = NULL;
 
-    tn = parse_task_name(unwinder, task_addr);
+    tn = parse_task_name_from_buffer(unwinder, task_obj);
     if (tn == NULL) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to parse task name in single task node");
         goto error;
@@ -599,7 +626,7 @@ process_single_task_node(
         goto error;
     }
 
-    if (parse_task(unwinder, task_addr, coroutine_stack) < 0) {
+    if (parse_task_from_buffer(unwinder, task_addr, task_obj, coroutine_stack) < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to parse task coroutine stack in single task node");
         goto error;
     }
@@ -640,7 +667,9 @@ process_single_task_node(
 
     // Get back current_awaited_by reference for parse_task_awaited_by
     current_awaited_by = PyStructSequence_GetItem(result_item, 3);
-    if (parse_task_awaited_by(unwinder, task_addr, current_awaited_by) < 0) {
+    if (process_task_awaited_by_from_buffer(unwinder, task_obj,
+                                            process_task_parser,
+                                            current_awaited_by) < 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to parse awaited_by in single task node");
         // No cleanup needed here since all references were transferred to result_item
         // and result_item was already added to result list and decreffed
@@ -659,18 +688,42 @@ error:
 }
 
 int
+process_single_task_node(
+    RemoteUnwinderObject *unwinder,
+    uintptr_t task_addr,
+    PyObject **task_info,
+    PyObject *result
+) {
+    char task_obj[SIZEOF_TASK_OBJ];
+    if (read_task_object(unwinder, task_addr, task_obj,
+                         "Failed to read task object") < 0) {
+        return -1;
+    }
+    return process_single_task_node_from_buffer(unwinder, task_addr, task_obj,
+                                                task_info, result);
+}
+
+int
 process_task_and_waiters(
     RemoteUnwinderObject *unwinder,
     uintptr_t task_addr,
     PyObject *result
 ) {
+    char task_obj[SIZEOF_TASK_OBJ];
+    if (read_task_object(unwinder, task_addr, task_obj,
+                         "Failed to read task object") < 0) {
+        return -1;
+    }
+
     // First, add this task to the result
-    if (process_single_task_node(unwinder, task_addr, NULL, result) < 0) {
+    if (process_single_task_node_from_buffer(unwinder, task_addr, task_obj,
+                                             NULL, result) < 0) {
         return -1;
     }
 
     // Now find all tasks that are waiting for this task and process them
-    return process_task_awaited_by(unwinder, task_addr, process_waiter_task, result);
+    return process_task_awaited_by_from_buffer(unwinder, task_obj,
+                                               process_waiter_task, result);
 }
 
 // Processor function for task waiters
@@ -723,17 +776,13 @@ find_running_task_in_thread(
     return 0;
 }
 
-int
-get_task_code_object(RemoteUnwinderObject *unwinder, uintptr_t task_addr, uintptr_t *code_obj_addr) {
-    uintptr_t running_coro_addr = 0;
-
-    if(read_py_ptr(
-        unwinder,
-        task_addr + (uintptr_t)unwinder->async_debug_offsets.asyncio_task_object.task_coro,
-        &running_coro_addr) < 0) {
-        set_exception_cause(unwinder, PyExc_RuntimeError, "Running task coro read failed");
-        return -1;
-    }
+static int
+get_task_code_object_from_buffer(RemoteUnwinderObject *unwinder,
+                                 const char *task_obj,
+                                 uintptr_t *code_obj_addr)
+{
+    uintptr_t running_coro_addr = GET_MEMBER_NO_TAG(uintptr_t, task_obj,
+        unwinder->async_debug_offsets.asyncio_task_object.task_coro);
 
     if (running_coro_addr == 0) {
         PyErr_SetString(PyExc_RuntimeError, "Running task coro is NULL");
@@ -940,14 +989,20 @@ process_running_task_chain(
     uintptr_t thread_state_addr,
     PyObject *result
 ) {
+    char task_obj[SIZEOF_TASK_OBJ];
     uintptr_t running_task_code_obj = 0;
-    if(get_task_code_object(unwinder, running_task_addr, &running_task_code_obj) < 0) {
+    if (read_task_object(unwinder, running_task_addr, task_obj,
+                         "Failed to read running task object") < 0) {
+        return -1;
+    }
+    if(get_task_code_object_from_buffer(unwinder, task_obj, &running_task_code_obj) < 0) {
         return -1;
     }
 
     // First, add this task to the result
     PyObject *task_info = NULL;
-    if (process_single_task_node(unwinder, running_task_addr, &task_info, result) < 0) {
+    if (process_single_task_node_from_buffer(unwinder, running_task_addr,
+                                             task_obj, &task_info, result) < 0) {
         return -1;
     }
 
@@ -978,7 +1033,8 @@ process_running_task_chain(
     }
 
     // Now find all tasks that are waiting for this task and process them
-    if (process_task_awaited_by(unwinder, running_task_addr, process_waiter_task, result) < 0) {
+    if (process_task_awaited_by_from_buffer(unwinder, task_obj,
+                                            process_waiter_task, result) < 0) {
         return -1;
     }
 

@@ -81,18 +81,12 @@ process_single_stack_chunk(
 
 int
 copy_stack_chunks(RemoteUnwinderObject *unwinder,
-                  uintptr_t tstate_addr,
+                  uintptr_t chunk_addr,
                   StackChunkList *out_chunks)
 {
-    uintptr_t chunk_addr;
     StackChunkInfo *chunks = NULL;
     size_t count = 0;
     size_t max_chunks = 16;
-
-    if (read_ptr(unwinder, tstate_addr + (uintptr_t)unwinder->debug_offsets.thread_state.datastack_chunk, &chunk_addr)) {
-        set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read initial stack chunk address");
-        return -1;
-    }
 
     chunks = PyMem_RawMalloc(max_chunks * sizeof(StackChunkInfo));
     if (!chunks) {
@@ -188,7 +182,7 @@ is_frame_valid(
     return 1;
 }
 
-static int
+int
 parse_frame_buffer(
     RemoteUnwinderObject *unwinder,
     PyObject** result,
@@ -603,7 +597,7 @@ collect_frames_with_cache(
     // parsed from a stable snapshot, which keeps moving stacks from seeding the
     // cache with an impossible parent chain.
     if (ctx->chunks->count == 0) {
-        if (copy_stack_chunks(unwinder, ctx->thread_state_addr, ctx->chunks) < 0) {
+        if (copy_stack_chunks(unwinder, ctx->datastack_chunk_addr, ctx->chunks) < 0) {
             return -1;
         }
     }

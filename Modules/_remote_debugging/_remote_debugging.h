@@ -439,6 +439,7 @@ typedef struct {
     uintptr_t frame_addr;           // Starting frame address
     uintptr_t thread_state_addr;    // Owning thread state address
     uintptr_t base_frame_addr;      // Sentinel at bottom (for validation)
+    uintptr_t datastack_chunk_addr; // datastack_chunk from the same tstate snapshot
     uintptr_t gc_frame;             // GC frame address (0 if not tracking)
     FrameCacheAnchor last_profiled; // Last cached frame anchor
     StackChunkList *chunks;         // Pre-copied stack chunks
@@ -603,6 +604,14 @@ extern int parse_frame_object(
     uintptr_t* previous_frame
 );
 
+extern int parse_frame_buffer(
+    RemoteUnwinderObject *unwinder,
+    PyObject** result,
+    const char *frame,
+    uintptr_t* address_of_code_object,
+    uintptr_t* previous_frame
+);
+
 extern int parse_frame_from_chunks(
     RemoteUnwinderObject *unwinder,
     PyObject **result,
@@ -614,7 +623,7 @@ extern int parse_frame_from_chunks(
 
 /* Stack chunk management */
 extern void cleanup_stack_chunks(StackChunkList *chunks);
-extern int copy_stack_chunks(RemoteUnwinderObject *unwinder, uintptr_t tstate_addr, StackChunkList *out_chunks);
+extern int copy_stack_chunks(RemoteUnwinderObject *unwinder, uintptr_t chunk_addr, StackChunkList *out_chunks);
 extern void *find_frame_in_chunks(StackChunkList *chunks, uintptr_t remote_ptr);
 
 extern int process_frame_chain(
@@ -721,8 +730,6 @@ extern int read_async_debug(RemoteUnwinderObject *unwinder);
 extern int ensure_async_debug_offsets(RemoteUnwinderObject *unwinder);
 
 /* Task parsing */
-extern PyObject *parse_task_name(RemoteUnwinderObject *unwinder, uintptr_t task_address);
-
 extern int parse_task(
     RemoteUnwinderObject *unwinder,
     uintptr_t task_address,
@@ -775,12 +782,6 @@ extern int find_running_task_in_thread(
     RemoteUnwinderObject *unwinder,
     uintptr_t thread_state_addr,
     uintptr_t *running_task_addr
-);
-
-extern int get_task_code_object(
-    RemoteUnwinderObject *unwinder,
-    uintptr_t task_addr,
-    uintptr_t *code_obj_addr
 );
 
 extern int append_awaited_by(
