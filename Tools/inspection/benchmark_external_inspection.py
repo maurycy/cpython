@@ -242,25 +242,28 @@ def benchmark(unwinder, duration_seconds=10, blocking=False, operation="stack_tr
         f"for {duration_seconds} seconds...{colors.RESET}"
     )
 
+    BATCH = 1000
     try:
-        while time.perf_counter() < end_time:
-            total_attempts += 1
-            work_start = time.perf_counter()
-            try:
-                if blocking:
-                    unwinder.pause_threads()
+        while True:
+            batch_start = time.perf_counter()
+            if batch_start >= end_time:
+                break
+            for _ in range(BATCH):
+                total_attempts += 1
                 try:
-                    sample = operation_method()
-                    if sample:
-                        sample_count += 1
-                finally:
                     if blocking:
-                        unwinder.resume_threads()
-            except (OSError, RuntimeError, UnicodeDecodeError) as e:
-                fail_count += 1
+                        unwinder.pause_threads()
+                    try:
+                        sample = operation_method()
+                        if sample:
+                            sample_count += 1
+                    finally:
+                        if blocking:
+                            unwinder.resume_threads()
+                except (OSError, RuntimeError, UnicodeDecodeError) as e:
+                    fail_count += 1
 
-            work_end = time.perf_counter()
-            total_work_time += work_end - work_start
+            total_work_time += time.perf_counter() - batch_start
 
             if total_attempts % 10000 == 0:
                 avg_work_time_us = (total_work_time / total_attempts) * 1e6
