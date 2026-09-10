@@ -559,6 +559,9 @@ unwind_stack_for_thread(
     {
         PyObject *leaf = read_native_callable_frame(
             unwinder, frame_addr, &ctx);
+        if (leaf == NULL && PyErr_Occurred()) {
+            goto error;
+        }
         if (leaf != NULL) {
             Py_ssize_t pos = (unwinder->gc && gc_frame == frame_addr) ? 1 : 0;
             int rc = PyList_Insert(frame_info, pos, leaf);

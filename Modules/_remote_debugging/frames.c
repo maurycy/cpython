@@ -6,7 +6,6 @@
  ******************************************************************************/
 
 #include "_remote_debugging.h"
-#include "internal/pycore_opcode_metadata.h"
 #include "opcode_ids.h"
 
 /* ============================================================================
@@ -305,17 +304,8 @@ parse_frame_from_chunks(
 #define NATIVE_NAME_MAX 128
 #define NATIVE_FRAME_CACHE_MAX_ENTRIES 4096
 
-#define CALLABLE_HEADER_SIZE \
-    (offsetof(PyWrapperDescrObject, d_base) + sizeof(void *))
-static_assert(offsetof(PyCFunctionObject, m_module) + sizeof(void *) <=
-                   CALLABLE_HEADER_SIZE,
-               "PyCFunctionObject fields must fit in the callable header");
-static_assert(offsetof(PyMethodDescrObject, d_method) + sizeof(void *) <=
-                   CALLABLE_HEADER_SIZE,
-               "PyMethodDescrObject fields must fit in the callable header");
-
 typedef struct {
-    char header[CALLABLE_HEADER_SIZE];
+    char header[sizeof(PyCFunctionObject)];
     PyObject *frame;
 } CachedNativeFrame;
 
@@ -365,8 +355,8 @@ read_c_string(RemoteUnwinderObject *unwinder, uintptr_t address,
         }
         got += chunk;
     }
-    buf[maxlen - 1] = '\0';
-    return 0;
+    // Do not report a truncated name as a different callable.
+    return -1;
 }
 
 static int
@@ -395,7 +385,8 @@ read_object_type_name(RemoteUnwinderObject *unwinder, uintptr_t obj,
 }
 
 static PyObject *
-builtin_function_name(RemoteUnwinderObject *unwinder, const char *header)
+builtin_function_name(RemoteUnwinderObject *unwinder, const char *header,
+                      int *cacheable)
 {
     uintptr_t method_def = GET_MEMBER(
         uintptr_t, header, offsetof(PyCFunctionObject, m_ml));
@@ -427,6 +418,9 @@ builtin_function_name(RemoteUnwinderObject *unwinder, const char *header)
         }
     }
 
+    // Bound methods can change names when their receiver's heap type is
+    // renamed. Only cache module-level functions, whose receiver is stable.
+    *cacheable = 1;
     uintptr_t module = GET_MEMBER(
         uintptr_t, header, offsetof(PyCFunctionObject, m_module));
     if (module != 0) {
@@ -492,7 +486,7 @@ static_type_name(RemoteUnwinderObject *unwinder, uintptr_t type_addr)
         return NULL;
     }
     if (flags & Py_TPFLAGS_HEAPTYPE) {
-        return Py_NewRef(Py_None);
+        return NULL;
     }
     char name[NATIVE_NAME_MAX];
     if (read_type_name(unwinder, type_addr, name, sizeof(name)) < 0) {
@@ -503,79 +497,103 @@ static_type_name(RemoteUnwinderObject *unwinder, uintptr_t type_addr)
 
 static PyObject *
 resolve_callable_name(RemoteUnwinderObject *unwinder, uintptr_t obj,
-                      const char *header, uintptr_t type_addr)
+                      char *header, int *cacheable)
 {
-    char type_name[NATIVE_NAME_MAX];
-    if (read_type_name(
-            unwinder, type_addr, type_name, sizeof(type_name)) < 0) {
+    uintptr_t type_addr;
+    if (read_ptr(unwinder,
+                 obj + unwinder->debug_offsets.pyobject.ob_type, &type_addr) < 0
+        || type_addr == 0) {
         return NULL;
     }
-    if (strcmp(type_name, "builtin_function_or_method") == 0
-        || strcmp(type_name, "builtin_method") == 0) {
-        return builtin_function_name(unwinder, header);
+    char type[SIZEOF_TYPE_OBJ];
+    if (_Py_RemoteDebug_PagedReadRemoteMemory(
+            &unwinder->handle, type_addr, sizeof(type), type) < 0) {
+        return NULL;
     }
-    if (strcmp(type_name, "method_descriptor") == 0
-        || strcmp(type_name, "classmethod_descriptor") == 0
-        || strcmp(type_name, "wrapper_descriptor") == 0) {
+    unsigned long flags = GET_MEMBER(
+        unsigned long, type, unwinder->debug_offsets.type_object.tp_flags);
+    if (flags & Py_TPFLAGS_HEAPTYPE) {
+        return NULL;
+    }
+    Py_ssize_t basicsize = GET_MEMBER(
+        Py_ssize_t, type, unwinder->debug_offsets.type_object.tp_basicsize);
+    uintptr_t name_ptr = GET_MEMBER(
+        uintptr_t, type, unwinder->debug_offsets.type_object.tp_name);
+    char type_name[NATIVE_NAME_MAX];
+    if (name_ptr == 0
+        || read_c_string(unwinder, name_ptr, type_name, sizeof(type_name)) < 0) {
+        return NULL;
+    }
+
+    // Callable fields have no debug offsets. Like other local layouts in this
+    // module, these require a matching Python version and object header.
+    // Check the static type's size before reading its callable fields.
+    if ((strcmp(type_name, "builtin_function_or_method") == 0
+         && basicsize == PyCFunction_Type.tp_basicsize)
+        || (strcmp(type_name, "builtin_method") == 0
+            && basicsize == PyCMethod_Type.tp_basicsize)) {
+        if (_Py_RemoteDebug_PagedReadRemoteMemory(
+                &unwinder->handle, obj, sizeof(PyCFunctionObject), header) < 0) {
+            return NULL;
+        }
+        return builtin_function_name(unwinder, header, cacheable);
+    }
+    if ((strcmp(type_name, "method_descriptor") == 0
+         && basicsize == PyMethodDescr_Type.tp_basicsize)
+        || (strcmp(type_name, "classmethod_descriptor") == 0
+            && basicsize == PyClassMethodDescr_Type.tp_basicsize)
+        || (strcmp(type_name, "wrapper_descriptor") == 0
+            && basicsize == PyWrapperDescr_Type.tp_basicsize)) {
+        char header[sizeof(PyDescrObject)];
+        if (_Py_RemoteDebug_PagedReadRemoteMemory(
+                &unwinder->handle, obj, sizeof(header), header) < 0) {
+            return NULL;
+        }
         return descriptor_name(unwinder, header);
     }
-    if (strcmp(type_name, "type") == 0) {
+    if (strcmp(type_name, "type") == 0
+        && basicsize == PyType_Type.tp_basicsize) {
         return static_type_name(unwinder, obj);
     }
-    return Py_NewRef(Py_None);
+    return NULL;
 }
 
 static PyObject *
 resolve_native_callable_frame(RemoteUnwinderObject *unwinder, uintptr_t obj)
 {
-    char header[CALLABLE_HEADER_SIZE];
-    if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, obj,
-                                              sizeof(header), header) < 0) {
-        return NULL;
-    }
-    size_t type_offset = unwinder->debug_offsets.pyobject.ob_type;
-    if (type_offset > sizeof(header) - sizeof(uintptr_t)) {
-        return NULL;
-    }
-
+    char header[sizeof(PyCFunctionObject)];
     _Py_hashtable_t *cache = get_or_create_native_frame_cache(unwinder);
     if (cache != NULL) {
         CachedNativeFrame *entry = _Py_hashtable_get(cache, (void *)obj);
         if (entry != NULL) {
-            size_t size = entry->frame != NULL
-                ? sizeof(header) - type_offset
-                : sizeof(uintptr_t);
-            if (memcmp(entry->header + type_offset,
-                       header + type_offset, size) == 0) {
-                return Py_XNewRef(entry->frame);
+            // Recheck the header because the address may have been reused.
+            // The refcount changes during normal use, so do not compare it.
+            if (_Py_RemoteDebug_PagedReadRemoteMemory(
+                    &unwinder->handle, obj, sizeof(header), header) < 0) {
+                return NULL;
+            }
+            size_t offset = offsetof(PyObject, ob_type);
+            if (memcmp(entry->header + offset, header + offset,
+                       sizeof(header) - offset) == 0) {
+                return Py_NewRef(entry->frame);
             }
             entry = _Py_hashtable_steal(cache, (void *)obj);
             cached_native_frame_destroy(entry);
         }
     }
 
-    uintptr_t type_addr = GET_MEMBER(uintptr_t, header, type_offset);
-    if (type_addr == 0) {
-        return NULL;
-    }
-    PyObject *name = resolve_callable_name(unwinder, obj, header, type_addr);
+    int cacheable = 0;
+    PyObject *name = resolve_callable_name(unwinder, obj, header, &cacheable);
     if (name == NULL) {
         return NULL;
     }
-    PyObject *frame = NULL;
-    if (name != Py_None) {
-        frame = make_frame_info(
-            unwinder, _Py_LATIN1_CHR('~'), Py_None, name, Py_None);
-        if (frame == NULL) {
-            Py_DECREF(name);
-            return NULL;
-        }
-    }
+    PyObject *frame = make_frame_info(
+        unwinder, _Py_LATIN1_CHR('~'), Py_None, name, Py_None);
     Py_DECREF(name);
-
-    if (cache == NULL) {
+    if (frame == NULL || !cacheable || cache == NULL) {
         return frame;
     }
+
     if (_Py_hashtable_len(cache) >= NATIVE_FRAME_CACHE_MAX_ENTRIES) {
         _Py_hashtable_clear(cache);
     }
@@ -584,15 +602,15 @@ resolve_native_callable_frame(RemoteUnwinderObject *unwinder, uintptr_t obj)
         return frame;
     }
     memcpy(entry->header, header, sizeof(header));
-    entry->frame = Py_XNewRef(frame);
+    entry->frame = Py_NewRef(frame);
     if (_Py_hashtable_set(cache, (void *)obj, entry) < 0) {
         cached_native_frame_destroy(entry);
     }
     return frame;
 }
 
-PyObject *
-read_native_callable_frame(
+static uintptr_t
+read_native_callable(
     RemoteUnwinderObject *unwinder,
     uintptr_t frame_addr,
     const FrameWalkContext *ctx)
@@ -610,7 +628,7 @@ read_native_callable_frame(
         if (_Py_RemoteDebug_PagedReadRemoteMemory(
                 &unwinder->handle, frame_addr,
                 SIZEOF_INTERP_FRAME, local_frame) < 0) {
-            goto fail;
+            return 0;
         }
         frame = local_frame;
     }
@@ -618,7 +636,7 @@ read_native_callable_frame(
     char owner = GET_MEMBER(
         char, frame, unwinder->debug_offsets.interpreter_frame.owner);
     if (owner != FRAME_OWNED_BY_THREAD && owner != FRAME_OWNED_BY_GENERATOR) {
-        return NULL;
+        return 0;
     }
     uintptr_t instr_ptr = GET_MEMBER(
         uintptr_t, frame,
@@ -627,60 +645,146 @@ read_native_callable_frame(
         uintptr_t, frame,
         unwinder->debug_offsets.interpreter_frame.stackpointer);
     if (instr_ptr == 0 || stackpointer == 0) {
-        return NULL;
+        return 0;
     }
 
-    _Py_CODEUNIT unit;
-    if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, instr_ptr,
-                                              sizeof(unit), &unit) < 0) {
-        goto fail;
+    // The preceding word can also be inline cache data. Rejecting it when it
+    // looks like EXTENDED_ARG is conservative; decoding only the low byte is not.
+    if (instr_ptr < sizeof(_Py_CODEUNIT)
+        || instr_ptr % sizeof(_Py_CODEUNIT) != 0) {
+        return 0;
     }
-    int opcode = unit.op.code;
-    int oparg = unit.op.arg;
+    _Py_CODEUNIT units[2];
+    if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle,
+            instr_ptr - sizeof(_Py_CODEUNIT), sizeof(units), units) < 0) {
+        return 0;
+    }
+    if (units[0].op.code == EXTENDED_ARG) {
+        return 0;
+    }
+    int opcode = units[1].op.code;
+    int oparg = units[1].op.arg;
 
     Py_ssize_t depth;
-    switch (_PyOpcode_Deopt[opcode]) {
+    // These Tier 1 calls publish the stack with their inputs still present.
+    // Do not infer the layout of other specializations from their base opcode.
+    switch (opcode) {
         case CALL:
+        case CALL_NON_PY_GENERAL:
+        case CALL_BUILTIN_CLASS:
+        case CALL_BUILTIN_O:
+        case CALL_BUILTIN_FAST:
+        case CALL_BUILTIN_FAST_WITH_KEYWORDS:
+        case CALL_METHOD_DESCRIPTOR_O:
+        case CALL_METHOD_DESCRIPTOR_NOARGS:
+        case CALL_METHOD_DESCRIPTOR_FAST:
+        case CALL_METHOD_DESCRIPTOR_FAST_WITH_KEYWORDS:
+            // callable, self_or_null, args[oparg]
             depth = 2 + oparg;
             break;
         case CALL_KW:
+        case CALL_KW_NON_PY:
+            // callable, self_or_null, args[oparg], kwnames
             depth = 3 + oparg;
             break;
         case CALL_FUNCTION_EX:
+        case CALL_EX_NON_PY_GENERAL:
+            // callable, NULL, callargs, kwargs_or_null
             depth = 4;
             break;
         default:
-            return NULL;
+            return 0;
     }
 
-    uintptr_t ref;
-    uintptr_t slot_addr = stackpointer - depth * sizeof(_PyStackRef);
+    // Bound the evaluation stack, excluding locals. The code layout is checked
+    // by read_native_callable_frame(), as these fields have no debug offsets.
+    uintptr_t code_addr = GET_MEMBER_NO_TAG(
+        uintptr_t, frame, unwinder->debug_offsets.interpreter_frame.executable);
+    char code[offsetof(PyCodeObject, co_nlocalsplus) + sizeof(int)];
+    if (code_addr == 0 || _Py_RemoteDebug_PagedReadRemoteMemory(
+            &unwinder->handle, code_addr, sizeof(code), code) < 0) {
+        return 0;
+    }
+    int nlocals = GET_MEMBER(int, code, offsetof(PyCodeObject, co_nlocalsplus));
+    int stacksize = GET_MEMBER(int, code, offsetof(PyCodeObject, co_stacksize));
+    if (nlocals < 0 || stacksize < depth
+        || (size_t)nlocals > (SIZE_MAX - SIZEOF_INTERP_FRAME) / sizeof(_PyStackRef)) {
+        return 0;
+    }
+    size_t stack_offset = unwinder->debug_offsets.interpreter_frame.localsplus
+        + (size_t)nlocals * sizeof(_PyStackRef);
+    if (frame_addr > UINTPTR_MAX - stack_offset) {
+        return 0;
+    }
+    uintptr_t stack_base = frame_addr + stack_offset;
+    size_t size = depth * sizeof(_PyStackRef);
+    if (stackpointer < stack_base || stackpointer - stack_base < size
+        || (stackpointer - stack_base) % sizeof(_PyStackRef) != 0
+        || (stackpointer - stack_base) / sizeof(_PyStackRef) > (size_t)stacksize) {
+        return 0;
+    }
+    uintptr_t refs[4];
+    int call_ex = opcode == CALL_FUNCTION_EX || opcode == CALL_EX_NON_PY_GENERAL;
+    size_t read_size = call_ex ? sizeof(refs) : sizeof(refs[0]);
+    uintptr_t slot_addr = stackpointer - size;
     void *slot = ctx->chunks != NULL
-        ? find_frame_in_chunks(ctx->chunks, slot_addr, sizeof(ref))
+        ? find_frame_in_chunks(ctx->chunks, slot_addr, read_size)
         : NULL;
     if (slot != NULL) {
-        memcpy(&ref, slot, sizeof(ref));
+        memcpy(refs, slot, read_size);
     }
     else if (_Py_RemoteDebug_PagedReadRemoteMemory(
-                 &unwinder->handle, slot_addr, sizeof(ref), &ref) < 0) {
-        goto fail;
+                 &unwinder->handle, slot_addr, read_size, refs) < 0) {
+        return 0;
     }
-    if ((ref & Py_TAG_BITS) == Py_INT_TAG) {
-        return NULL;
+    if (call_ex) {
+        // CALL_FUNCTION_EX can run Python while converting *args to a tuple,
+        // before it invokes the callable. Do not attribute that work to it.
+        uintptr_t args_type;
+        uintptr_t args = CLEAR_PTR_TAG(refs[2]);
+        if (args == 0 || read_ptr(unwinder,
+                args + unwinder->debug_offsets.pyobject.ob_type, &args_type) < 0) {
+            return 0;
+        }
+        unsigned long flags;
+        char name[NATIVE_NAME_MAX];
+        if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle,
+                args_type + unwinder->debug_offsets.type_object.tp_flags,
+                sizeof(flags), &flags) < 0
+            || (flags & Py_TPFLAGS_HEAPTYPE)
+            || read_type_name(unwinder, args_type, name, sizeof(name)) < 0
+            || strcmp(name, "tuple") != 0) {
+            return 0;
+        }
     }
-    uintptr_t obj = CLEAR_PTR_TAG(ref);
-    if (obj == 0) {
-        return NULL;
+    uintptr_t ref = refs[0];
+    if ((ref & Py_TAG_BITS) == Py_INT_TAG
+        || (ref & Py_TAG_BITS) == Py_TAG_INVALID) {
+        return 0;
     }
-    PyObject *native_frame = resolve_native_callable_frame(unwinder, obj);
-    if (native_frame == NULL) {
-        goto fail;
-    }
-    return native_frame;
+    return CLEAR_PTR_TAG(ref);
+}
 
-fail:
-    PyErr_Clear();
-    return NULL;
+PyObject *
+read_native_callable_frame(
+    RemoteUnwinderObject *unwinder,
+    uintptr_t frame_addr,
+    const FrameWalkContext *ctx)
+{
+    if (unwinder->debug_offsets.pyobject.size != sizeof(PyObject)
+        || unwinder->debug_offsets.pyobject.ob_type != offsetof(PyObject, ob_type)
+        || unwinder->debug_offsets.code_object.co_code_adaptive
+            != offsetof(PyCodeObject, co_code_adaptive)) {
+        return NULL;
+    }
+    uintptr_t obj = read_native_callable(unwinder, frame_addr, ctx);
+    PyObject *frame = obj ? resolve_native_callable_frame(unwinder, obj) : NULL;
+    if (frame == NULL && !PyErr_ExceptionMatches(PyExc_MemoryError)) {
+        // An unreadable or unsupported callable must not discard the Python
+        // stack. Allocation failures in the profiler are still errors.
+        PyErr_Clear();
+    }
+    return frame;
 }
 
 /* ============================================================================
@@ -771,6 +875,10 @@ parsed_frame:
             extra_frame_info = read_native_callable_frame(
                 unwinder, next_frame_addr, ctx);
             if (extra_frame_info == NULL) {
+                if (PyErr_Occurred()) {
+                    Py_XDECREF(frame);
+                    return -1;
+                }
                 _Py_DECLARE_STR(native, "<native>");
                 extra_frame_info = make_frame_info(
                     unwinder, _Py_LATIN1_CHR('~'), Py_None,

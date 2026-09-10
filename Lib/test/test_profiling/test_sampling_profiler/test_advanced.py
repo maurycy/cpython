@@ -20,13 +20,14 @@ except ImportError:
 
 from test.support import (
     SHORT_TIMEOUT,
+    busy_retry,
     SuppressCrashReport,
     os_helper,
     requires_remote_subprocess_debugging,
     script_helper,
 )
 
-from .helpers import close_and_unlink, test_subprocess
+from .helpers import _wait_for_signal, close_and_unlink, test_subprocess
 
 
 @requires_remote_subprocess_debugging()
@@ -162,8 +163,8 @@ while True:
 
         stacks = [line.rsplit(" ", 1)[0] for line in lines]
 
-        # Most samples should have native code in the middle of the stack:
-        self.assertTrue(any(";<native>;" in stack for stack in stacks))
+        # The native caller should be named in the middle of the stack.
+        self.assertTrue(any(";_operator.call;" in stack for stack in stacks))
 
         # No samples should have native code at the top of the stack:
         self.assertFalse(any(stack.endswith(";<native>") for stack in stacks))
@@ -186,52 +187,154 @@ while True:
         # Native frames should NOT be present:
         self.assertNotIn("<native>", output)
 
-    def test_native_frames_named(self):
-        """Test that native frames are named after the C callable when known."""
-        script = """
+    def check_native_call(self, setup, call, name, *, warmup=True):
+        script = f"""
 import time
+import operator
+import functools
+
+waiting = False
+
+def cb(*args):
+    if waiting:
+        _test_sock.sendall(b"working")
+        time.sleep(3600)
+    return 0
+
+{setup}
+
+def run():
+    {call}
+
+# Exercise the same call site before sampling its specialized instruction.
+for _ in range({100 if warmup else 0}):
+    run()
+waiting = True
+run()
+"""
+        with test_subprocess(script, wait_for_working=True) as subproc:
+            for cache_frames in (False, True):
+                for native in (False, True):
+                    with self.subTest(cache_frames=cache_frames, native=native):
+                        unwinder = _remote_debugging.RemoteUnwinder(
+                            subproc.process.pid,
+                            native=native,
+                            cache_frames=cache_frames,
+                        )
+                        expected = (
+                            ["time.sleep", "cb", name, "run"]
+                            if native else ["cb", "run"]
+                        )
+                        # Read repeatedly to exercise both cache misses and hits.
+                        matches = 0
+                        for _ in busy_retry(SHORT_TIMEOUT, error=False):
+                            traces = unwinder.get_stack_trace()
+                            frames = traces[0].threads[0].frame_info
+                            names = [frame.funcname for frame in frames]
+                            if names[:len(expected)] == expected:
+                                matches += 1
+                                if matches == 3:
+                                    break
+                        self.assertEqual(names[:len(expected)], expected)
+                        self.assertEqual(matches, 3)
+                        if not native:
+                            self.assertFalse(any(f.filename == "~" for f in frames))
+
+    def test_native_frames_named(self):
+        cases = (
+            ("", "operator.call(cb)", "_operator.call"),
+            ("", "sorted([2, 1], key=cb)", "sorted"),
+            ("", "sorted(*([2, 1],), **{'key': cb})", "sorted"),
+            ("", "list.sort([2, 1], key=cb)", "list.sort"),
+            ("method = [2, 1].sort", "method(key=cb)", "list.sort"),
+            ("", "list(map(cb, [1]))", "list"),
+        )
+        for setup, call, name in cases:
+            with self.subTest(call=call):
+                self.check_native_call(setup, call, name)
+
+    def test_native_frames_unknown_callable(self):
+        self.check_native_call("", "functools.partial(cb)()", "<native>")
+
+    def test_native_frames_heap_type_name(self):
+        # A Python class can have the same name as a supported built-in type.
+        setup = """
+class builtin_function_or_method:
+    __call__ = staticmethod(cb)
+callable = builtin_function_or_method()
+"""
+        self.check_native_call(setup, "callable()", "<native>")
+
+    def test_native_frames_renamed_receiver(self):
+        script = """
+class Items(list):
+    pass
+
+method = Items([1]).sort
 
 def cb(x):
-    time.sleep(0.01)
+    _test_sock.sendall(b"working")
+    _test_sock.recv(1)
     return x
 
-_test_sock.sendall(b"working")
-while True:
-    sorted([2, 1], key=cb)
+def run():
+    method(key=cb)
+
+run()
+Items.__name__ = "RenamedItems"
+run()
 """
-        collapsed_file = tempfile.NamedTemporaryFile(
-            suffix=".txt", delete=False
-        )
-        self.addCleanup(close_and_unlink, collapsed_file)
+        for cache_frames in (False, True):
+            with self.subTest(cache_frames=cache_frames):
+                with test_subprocess(script, wait_for_working=True) as subproc:
+                    unwinder = _remote_debugging.RemoteUnwinder(
+                        subproc.process.pid, native=True, cache_frames=cache_frames,
+                    )
+                    for expected in ("Items.sort", "RenamedItems.sort"):
+                        for _ in range(3):
+                            traces = unwinder.get_stack_trace()
+                            names = [f.funcname for f in traces[0].threads[0].frame_info]
+                            pos = names.index("cb")
+                            self.assertEqual(names[pos:pos + 3], ["cb", expected, "run"])
+                        if expected == "Items.sort":
+                            subproc.socket.sendall(b"x")
+                            _wait_for_signal(subproc.socket, b"working")
 
-        with test_subprocess(script, wait_for_working=True) as subproc:
-            with (
-                io.StringIO() as captured_output,
-                mock.patch("sys.stdout", captured_output),
-            ):
-                collector = CollapsedStackCollector(1000, skip_idle=False)
-                profiling.sampling.sample.sample(
-                    subproc.process.pid,
-                    collector,
-                    duration_sec=1,
-                    native=True,
-                )
-                collector.export(collapsed_file.name)
+    def test_native_frames_call_ex_iterable(self):
+        setup = """
+class Args:
+    __iter__ = staticmethod(cb)
+"""
+        # cb returns an integer during warmup, so avoid warming up this call.
+        self.check_native_call(setup, "sorted(*Args())", "<native>", warmup=False)
 
-            with open(collapsed_file.name, "r") as f:
-                content = f.read()
+    def test_native_frames_extended_arg(self):
+        setup = """
+import dis
+import types
 
-        stacks = [line.rsplit(" ", 1)[0] for line in content.strip().split("\n")]
-
-        # The C function that called back into Python names the marker and the
-        # innermost C call is a leaf frame:
-        self.assertTrue(
-            any(
-                ";sorted;" in stack and stack.endswith(";time.sleep")
-                for stack in stacks
-            ),
-            stacks,
-        )
+# The compiler normally uses CALL_FUNCTION_EX for this many arguments.
+# Construct a valid CALL with 256 arguments to exercise EXTENDED_ARG.
+instructions = [("RESUME", 0), ("LOAD_CONST", 0), ("PUSH_NULL", 0),
+                ("LOAD_CONST", 1)]
+instructions += [("LOAD_CONST", 2)] * 253
+# Reading only CALL's low byte would mistake this argument for the callable.
+instructions += [("LOAD_CONST", 3), ("LOAD_CONST", 2)]
+instructions += [("EXTENDED_ARG", 1), ("CALL", 0)]
+instructions += [("RETURN_VALUE", 0)]
+code = bytearray()
+for op, arg in instructions:
+    code.extend((dis.opmap[op], arg))
+    code.extend(bytes(2 * dis._inline_cache_entries.get(op, 0)))
+invoke = types.FunctionType(
+    (lambda: None).__code__.replace(
+        co_code=bytes(code), co_consts=(operator.call, cb, None, time.sleep),
+        co_stacksize=258,
+        co_name="run", co_qualname="run",
+    ), globals(),
+)
+"""
+        self.check_native_call(setup, "invoke()", "<native>")
 
 
 @requires_remote_subprocess_debugging()
