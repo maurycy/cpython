@@ -360,6 +360,7 @@ typedef struct {
     uintptr_t interpreter_addr;
     uintptr_t tstate_addr;
     _Py_hashtable_t *code_object_cache;
+    _Py_hashtable_t *native_frame_cache;
     int debug;
     int only_active_thread;
     int mode;
@@ -615,7 +616,13 @@ extern int parse_frame_from_chunks(
 /* Stack chunk management */
 extern void cleanup_stack_chunks(StackChunkList *chunks);
 extern int copy_stack_chunks(RemoteUnwinderObject *unwinder, uintptr_t tstate_addr, StackChunkList *out_chunks);
-extern void *find_frame_in_chunks(StackChunkList *chunks, uintptr_t remote_ptr);
+extern void *find_frame_in_chunks(StackChunkList *chunks, uintptr_t remote_ptr, size_t size);
+
+extern PyObject *read_native_callable_frame(
+    RemoteUnwinderObject *unwinder,
+    uintptr_t frame_addr,
+    const FrameWalkContext *ctx
+);
 
 extern int process_frame_chain(
     RemoteUnwinderObject *unwinder,

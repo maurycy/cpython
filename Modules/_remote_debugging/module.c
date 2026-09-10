@@ -1324,6 +1324,9 @@ RemoteUnwinder_dealloc(PyObject *op)
     if (self->code_object_cache) {
         _Py_hashtable_destroy(self->code_object_cache);
     }
+    if (self->native_frame_cache) {
+        _Py_hashtable_destroy(self->native_frame_cache);
+    }
 #ifdef MS_WINDOWS
     if (self->win_process_buffer != NULL) {
         PyMem_Free(self->win_process_buffer);

@@ -280,6 +280,7 @@ validate_fixed_field(
     APPLY(interpreter_frame, instr_ptr, sizeof(uintptr_t), _Alignof(uintptr_t), buffer_size); \
     APPLY(interpreter_frame, owner, sizeof(char), _Alignof(char), buffer_size); \
     APPLY(interpreter_frame, stackpointer, sizeof(uintptr_t), _Alignof(uintptr_t), buffer_size); \
+    APPLY(interpreter_frame, localsplus, sizeof(_PyStackRef), _Alignof(_PyStackRef), buffer_size); \
     APPLY(interpreter_frame, tlbc_index, sizeof(int32_t), _Alignof(int32_t), buffer_size)
 
 #define PY_REMOTE_DEBUG_CODE_OBJECT_FIELDS(APPLY, buffer_size) \
@@ -420,6 +421,18 @@ _PyRemoteDebug_ValidateDebugOffsetsLayout(struct _Py_DebugOffsets *debug_offsets
         tp_flags,
         sizeof(unsigned long),
         _Alignof(unsigned long),
+        SIZEOF_TYPE_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        type_object,
+        tp_name,
+        sizeof(uintptr_t),
+        _Alignof(uintptr_t),
+        SIZEOF_TYPE_OBJ);
+    PY_REMOTE_DEBUG_VALIDATE_FIELD(
+        type_object,
+        tp_basicsize,
+        sizeof(Py_ssize_t),
+        _Alignof(Py_ssize_t),
         SIZEOF_TYPE_OBJ);
 
     PY_REMOTE_DEBUG_VALIDATE_SECTION(set_object);
