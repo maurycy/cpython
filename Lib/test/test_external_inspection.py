@@ -13,7 +13,6 @@ from asyncio import staggered, taskgroups, base_events, tasks
 from unittest.mock import ANY
 from test.support import (
     os_helper,
-    threading_helper,
     SHORT_TIMEOUT,
     busy_retry,
     requires_gil_enabled,
@@ -3545,20 +3544,14 @@ class TestExceptionDetectionInProcess(RemoteInspectionTestBase):
             skip_non_matching_threads=True,
         )
 
-    @unittest.skipIf(
-        sys.platform == "linux" and not PROCESS_VM_READV_SUPPORTED,
-        "Test only runs on Linux with process_vm_readv support",
-    )
-    @requires_gil_enabled()
-    @threading_helper.requires_working_threading()
+    @requires_gil_enabled("Free threaded builds don't have an 'active thread'")
     def test_filtered_active_thread_is_not_replaced(self):
         samples = []
 
         def sample():
-            for kwargs in ({"all_threads": True},
-                           {"only_active_thread": True}):
+            for kwargs in ({"all_threads": True}, {"only_active_thread": True}):
                 unwinder = RemoteUnwinder(
-                    os.getpid(), mode=PROFILING_MODE_EXCEPTION, **kwargs,
+                    os.getpid(), mode=PROFILING_MODE_EXCEPTION, **kwargs
                 )
                 samples.append(
                     self._get_thread_statuses(unwinder.get_stack_trace())
@@ -3569,7 +3562,7 @@ class TestExceptionDetectionInProcess(RemoteInspectionTestBase):
             raise ValueError
         except ValueError:
             thread.start()
-            threading_helper.join_thread(thread)
+            thread.join()
 
         all_threads, active_thread = samples
         self.assertEqual(list(all_threads), [threading.get_native_id()])
