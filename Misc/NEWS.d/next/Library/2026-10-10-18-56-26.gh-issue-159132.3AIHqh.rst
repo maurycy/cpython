@@ -1,0 +1,3 @@
+Fix :mod:`!_remote_debugging` returning the next thread in the list when the
+selected thread does not match the profiling mode with
+``only_active_thread=True``.
