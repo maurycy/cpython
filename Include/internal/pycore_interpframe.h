@@ -300,10 +300,14 @@ static inline _PyControlRecord *
 _PyFrame_GetCaller(_PyControlRecord *frame)
 {
     assert(frame->state != CONTROL_DETACHED && frame->state != CONTROL_BASE);
+    _PyControlRecord *caller = frame - 1;
+    if (caller->state >= CONTROL_ACTIVE) {
+        return caller;
+    }
     do {
-        --frame;
-    } while (frame->state < CONTROL_ACTIVE);
-    return frame;
+        --caller;
+    } while (caller->state < CONTROL_ACTIVE);
+    return caller;
 }
 
 static inline _PyControlRecord *
