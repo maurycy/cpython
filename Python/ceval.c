@@ -1288,9 +1288,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
         _PyInterpreterDataFrame data;
         _PyStackRef result;
     } entry_data;
-    /* Experiment: do not keep the data frame pointer live across the whole
-       dispatch loop; every use reloads it from the control record. */
-#define fp (frame->data)
+    _PyInterpreterDataFrame *fp = frame->data;
 
     if (_Py_EnterRecursiveCallTstate(tstate, "")) {
         assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
@@ -1387,7 +1385,7 @@ early_exit:
     // GH-99729: We need to unlink the frame *before* clearing it:
     _PyControlRecord *dying = frame;
     frame = tstate->current_frame = _PyFrame_GetPrevious(dying);
-    _PyEval_FrameClearAndPop(tstate, dying, dying->data);
+    _PyEval_FrameClearAndPop(tstate, dying, fp);
     frame->return_offset = 0;
     assert(frame->owner == FRAME_OWNED_BY_INTERPRETER);
     /* Restore previous frame and exit */
@@ -1395,7 +1393,6 @@ early_exit:
     frame->state = CONTROL_RESERVED;
     return NULL;
 }
-#undef fp
 #ifdef _Py_TIER2
 #ifdef _Py_JIT
 _PyJitEntryFuncPtr _Py_jit_entry = _PyJIT_Entry;
@@ -1411,7 +1408,7 @@ _PyTier2Interpreter(
     _PyExecutorObject *current_executor, _PyControlRecord *frame,
     _PyStackRef *stack_pointer, PyThreadState *tstate
 ) {
-#define fp (frame->data)
+    _PyInterpreterDataFrame *fp = frame->data;
     const _PyUOpInstruction *next_uop;
     int oparg;
     /* Set up "jit" state after entry from tier 1.
@@ -1527,7 +1524,6 @@ jump_to_jump_target:
     goto tier2_dispatch;
 
 }
-#undef fp
 #endif // _Py_TIER2
 
 

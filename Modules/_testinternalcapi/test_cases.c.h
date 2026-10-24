@@ -8209,7 +8209,7 @@
                 DTRACE_FUNCTION_RETURN();
                 _PyControlRecord *dying = frame;
                 frame = tstate->current_frame = _PyFrame_GetCaller(dying);
-                _PyEval_FrameClearAndPop(tstate, dying, dying->data);
+                _PyEval_FrameClearAndPop(tstate, dying, fp);
                 fp = frame->data;
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 _PyFrame_StackPointerInvalidate(frame);
@@ -11483,7 +11483,7 @@
                 DTRACE_FUNCTION_RETURN();
                 _PyControlRecord *dying = frame;
                 frame = tstate->current_frame = _PyFrame_GetCaller(dying);
-                _PyEval_FrameClearAndPop(tstate, dying, dying->data);
+                _PyEval_FrameClearAndPop(tstate, dying, fp);
                 fp = frame->data;
                 stack_pointer = _PyFrame_GetStackPointer(frame);
                 _PyFrame_StackPointerInvalidate(frame);
@@ -13772,7 +13772,7 @@ JUMP_TO_LABEL(error);
             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
             _PyControlRecord *dying = frame;
             frame = tstate->current_frame = _PyFrame_GetCaller(dying);
-            _PyEval_FrameClearAndPop(tstate, dying, dying->data);
+            _PyEval_FrameClearAndPop(tstate, dying, fp);
             fp = frame->data;
             frame->return_offset = 0;
             if (frame->owner == FRAME_OWNED_BY_INTERPRETER) {

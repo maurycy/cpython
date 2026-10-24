@@ -1587,7 +1587,7 @@ dummy_func(
             // GH-99729: We need to unlink the frame *before* clearing it:
             _PyControlRecord *dying = frame;
             frame = tstate->current_frame = _PyFrame_GetCaller(dying);
-            _PyEval_FrameClearAndPop(tstate, dying, dying->data);
+            _PyEval_FrameClearAndPop(tstate, dying, fp);
             fp = frame->data;
             RELOAD_STACK();
             LOAD_IP(frame->return_offset);
@@ -6549,7 +6549,7 @@ dummy_func(
             // GH-99729: We need to unlink the frame *before* clearing it:
             _PyControlRecord *dying = frame;
             frame = tstate->current_frame = _PyFrame_GetCaller(dying);
-            _PyEval_FrameClearAndPop(tstate, dying, dying->data);
+            _PyEval_FrameClearAndPop(tstate, dying, fp);
             fp = frame->data;
             frame->return_offset = 0;
             if (frame->owner == FRAME_OWNED_BY_INTERPRETER) {

@@ -8791,7 +8791,7 @@
             DTRACE_FUNCTION_RETURN();
             _PyControlRecord *dying = frame;
             frame = tstate->current_frame = _PyFrame_GetCaller(dying);
-            _PyEval_FrameClearAndPop(tstate, dying, dying->data);
+            _PyEval_FrameClearAndPop(tstate, dying, fp);
             fp = frame->data;
             stack_pointer = _PyFrame_GetStackPointer(frame);
             _PyFrame_StackPointerInvalidate(frame);
