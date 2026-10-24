@@ -1830,8 +1830,10 @@ clear_datastack(PyThreadState *tstate)
     }
     chunk = tstate->datastack_cached_chunk;
     tstate->datastack_cached_chunk = NULL;
-    if (chunk != NULL) {
+    while (chunk != NULL) {
+        _PyStackChunk *prev = chunk->previous;
         _PyObject_VirtualFree(chunk, chunk->size);
+        chunk = prev;
     }
 }
 
@@ -3274,7 +3276,7 @@ push_chunk(PyThreadState *tstate, int size)
         && (size_t)allocate_size <= tstate->datastack_cached_chunk->size)
     {
         new = tstate->datastack_cached_chunk;
-        tstate->datastack_cached_chunk = NULL;
+        tstate->datastack_cached_chunk = new->previous;
         new->previous = tstate->datastack_chunk;
         new->top = 0;
     }
@@ -3306,17 +3308,28 @@ pop_data_stack(PyThreadState *tstate, _PyStackRef *slots)
     if (base == &tstate->datastack_chunk->data[0]) {
         _PyStackChunk *chunk = tstate->datastack_chunk;
         _PyStackChunk *previous = chunk->previous;
-        _PyStackChunk *cached = tstate->datastack_cached_chunk;
         // push_chunk ensures that the root chunk is never popped:
         assert(previous);
         tstate->datastack_top = &previous->data[previous->top];
         tstate->datastack_chunk = previous;
         tstate->datastack_limit = (PyObject **)(((char *)previous) + previous->size);
-        chunk->previous = NULL;
-        if (cached != NULL) {
-            _PyObject_VirtualFree(cached, cached->size);
-        }
+        // Keep a few freed chunks (linked through ->previous) so repeated
+        // deep descents do not map and unmap memory each time.
+        chunk->previous = tstate->datastack_cached_chunk;
         tstate->datastack_cached_chunk = chunk;
+        int kept = 1;
+        _PyStackChunk *last = chunk;
+        while (last->previous != NULL && kept < _PY_DATA_STACK_CACHED_CHUNKS) {
+            last = last->previous;
+            kept++;
+        }
+        _PyStackChunk *extra = last->previous;
+        last->previous = NULL;
+        while (extra != NULL) {
+            _PyStackChunk *next = extra->previous;
+            _PyObject_VirtualFree(extra, extra->size);
+            extra = next;
+        }
     }
     else {
         assert(tstate->datastack_top);

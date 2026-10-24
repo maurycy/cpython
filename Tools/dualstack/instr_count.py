@@ -122,6 +122,16 @@ def run(n):
     for i in range(n):
         rec(200)
 """,
+    "recursion_depth600": """
+import sys
+sys.setrecursionlimit(10000)
+def rec(d):
+    if d:
+        rec(d - 1)
+def run(n):
+    for i in range(n // 4):
+        rec(600)
+""",
     "exception_unwind10": """
 def raiser():
     raise ValueError
