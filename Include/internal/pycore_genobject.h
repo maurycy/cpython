@@ -28,21 +28,21 @@ _PyGen_FinalizerIsNoop(PyObject *op)
         FRAME_STATE_FINISHED(((PyGenObject *)op)->gi_frame_state);
 }
 #ifdef Py_GIL_DISABLED
-PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value);
+PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state);
 PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
 #else
 /* gi_iframe is a complete DETACHED record, so restoring is one struct copy.
    The stack pointer is kept in a register across the copy so pushing the
    sent value does not reload it from the bytes just written. */
 static inline void
-_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value)
+_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state)
 {
     assert(gen->gi_iframe.state == CONTROL_DETACHED);
     assert(gen->gi_iframe.data == &gen->gi_data);
     assert(gen->gi_iframe.owner == FRAME_OWNED_BY_GENERATOR);
     _PyStackRef *sp = gen->gi_iframe.stackpointer;
     *frame = gen->gi_iframe;
-    frame->state = CONTROL_RESERVED;
+    frame->state = (uint8_t)state;
     if (value != NULL) {
         *sp++ = *value;
         frame->stackpointer = sp;
@@ -76,8 +76,9 @@ static inline _PyControlRecord *
 _PyGen_PushFrameUnchecked(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value)
 {
     assert(gen->gi_live_frame == &gen->gi_iframe);
-    _PyControlRecord *frame = _PyThreadState_PushControlUnchecked(tstate);
-    _PyGen_LinkFrame(gen, frame, &value);
+    // Inlined resume: published ACTIVE, nothing runs before _PUSH_FRAME.
+    _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
+    _PyGen_LinkFrame(gen, frame, &value, CONTROL_ACTIVE);
     return frame;
 }
 
@@ -87,7 +88,7 @@ _PyGen_PushFrame(PyThreadState *tstate, PyGenObject *gen)
     assert(gen->gi_live_frame == &gen->gi_iframe);
     _PyControlRecord *frame = _PyThreadState_PushControl(tstate);
     if (frame != NULL) {
-        _PyGen_LinkFrame(gen, frame, NULL);
+        _PyGen_LinkFrame(gen, frame, NULL, CONTROL_RESERVED);
     }
     return frame;
 }

@@ -721,7 +721,7 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
     _PyControlRecord *frame = f->f_frame;
     if (tstate->controlstack_top < tstate->base_frame + 3 ||
         frame != tstate->controlstack_top - 1 ||
-        frame->state != CONTROL_RESERVED ||
+        (frame->state != CONTROL_RESERVED && frame->state != CONTROL_ACTIVE) ||
         (frame - 1)->state != CONTROL_RESERVED ||
         (frame - 1)->owner != FRAME_OWNED_BY_INTERPRETER)
     {
@@ -2153,15 +2153,25 @@ _PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
     }
     _PyInterpreterDataFrame *fp = frame->data;
     _PyFrame_Initialize(tstate, frame, fp, func, locals, code, 0);
-    _PyThreadState_AdjustControlLimit(tstate, 1);
-    int err = initialize_locals(tstate, func_obj, fp->localsplus, args, argcount, kwnames);
-    _PyThreadState_AdjustControlLimit(tstate, -1);
+    int err;
+    if (kwnames == NULL) {
+        // Positional binding cannot call back into Python.
+        err = initialize_locals(tstate, func_obj, fp->localsplus, args, argcount, kwnames);
+    }
+    else {
+        // Keyword matching may compare str subclasses, which runs Python
+        // while this record is still RESERVED; do not charge it for the slot.
+        _PyThreadState_AdjustControlLimit(tstate, 1);
+        err = initialize_locals(tstate, func_obj, fp->localsplus, args, argcount, kwnames);
+        _PyThreadState_AdjustControlLimit(tstate, -1);
+    }
     if (err) {
         assert(frame->owner == FRAME_OWNED_BY_THREAD);
         _PyThreadState_UpdateLastProfiledFrame(tstate, frame, tstate->current_frame);
         clear_thread_frame(tstate, frame, fp);
         return NULL;
     }
+    frame->state = CONTROL_ACTIVE;
     return frame;
 fail:
     /* Consume the references */

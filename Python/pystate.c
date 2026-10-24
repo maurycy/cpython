@@ -3338,16 +3338,13 @@ _PyThreadState_PushControlSlow(PyThreadState *tstate)
         return NULL;
     }
     _PyThreadState_UpdateControlLimit(tstate);
-    return _PyThreadState_PushControlUnchecked(tstate);
+    return _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
 }
 
 _PyControlRecord *
 _PyThreadState_PushFrame(PyThreadState *tstate, size_t size)
 {
     assert(size < INT_MAX / sizeof(PyObject *));
-    if (_PyThreadState_HasStackSpace(tstate, (int)size)) {
-        return _PyThreadState_PushFrameUnchecked(tstate, (int)size);
-    }
     _PyControlRecord *frame = _PyThreadState_PushControl(tstate);
     if (frame == NULL) {
         return NULL;

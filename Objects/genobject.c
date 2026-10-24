@@ -1031,10 +1031,10 @@ static PyMemberDef gen_memberlist[] = {
 #ifdef Py_GIL_DISABLED
 static void
 gen_copy_frame(PyGenObject *gen, _PyControlRecord *dest,
-               PyFrameObject *f, _PyCStackRef *value_ref)
+               PyFrameObject *f, _PyCStackRef *value_ref, int state)
 {
     *dest = *gen->gi_live_frame;
-    dest->state = dest == &gen->gi_iframe ? CONTROL_DETACHED : CONTROL_RESERVED;
+    dest->state = (uint8_t)state;
     if (value_ref != NULL) {
         *dest->stackpointer++ = _PyThreadState_PopCStackRefSteal(
             _PyThreadState_GET(), value_ref);
@@ -1046,7 +1046,7 @@ gen_copy_frame(PyGenObject *gen, _PyControlRecord *dest,
 }
 
 static void
-gen_transfer_frame(PyGenObject *gen, _PyControlRecord *dest, _PyStackRef *value)
+gen_transfer_frame(PyGenObject *gen, _PyControlRecord *dest, _PyStackRef *value, int state)
 {
     _PyCStackRef value_ref;
     if (value != NULL) {
@@ -1057,26 +1057,26 @@ gen_transfer_frame(PyGenObject *gen, _PyControlRecord *dest, _PyStackRef *value)
     PyFrameObject *f = gen->gi_data.frame_obj;
     if (f != NULL) {
         Py_BEGIN_CRITICAL_SECTION(f);
-        gen_copy_frame(gen, dest, f, value != NULL ? &value_ref : NULL);
+        gen_copy_frame(gen, dest, f, value != NULL ? &value_ref : NULL, state);
         Py_END_CRITICAL_SECTION();
     }
     else {
-        gen_copy_frame(gen, dest, NULL, value != NULL ? &value_ref : NULL);
+        gen_copy_frame(gen, dest, NULL, value != NULL ? &value_ref : NULL, state);
     }
     Py_END_CRITICAL_SECTION();
 }
 
 void
-_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value)
+_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state)
 {
-    gen_transfer_frame(gen, frame, value);
+    gen_transfer_frame(gen, frame, value, state);
 }
 
 void
 _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 {
     assert(gen->gi_live_frame == frame);
-    gen_transfer_frame(gen, &gen->gi_iframe, NULL);
+    gen_transfer_frame(gen, &gen->gi_iframe, NULL, CONTROL_DETACHED);
 }
 #endif
 
