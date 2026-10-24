@@ -408,9 +408,14 @@ _PyThreadState_HasControlSpace(PyThreadState *tstate, int frames)
 static inline bool
 _PyThreadState_HasStackSpace(PyThreadState *tstate, int size)
 {
-    return _PyThreadState_HasControlSpace(tstate, 2) &&
-        tstate->datastack_top != NULL &&
-        size < tstate->datastack_limit - tstate->datastack_top;
+    if (tstate->datastack_top == NULL) {
+        return false;
+    }
+    /* Evaluate both bounds without short-circuiting so the compiler can
+       fold them into one conditional compare instead of two branches. */
+    bool control = _PyThreadState_HasControlSpace(tstate, 2);
+    bool data = size < tstate->datastack_limit - tstate->datastack_top;
+    return control & data;
 }
 
 static inline Py_ssize_t
