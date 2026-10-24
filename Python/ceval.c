@@ -2073,12 +2073,31 @@ clear_thread_frame(PyThreadState *tstate, _PyControlRecord *frame,
            _PyFrame_GetCode(frame)->co_framesize ==
         tstate->datastack_top);
     assert(fp->frame_obj == NULL || fp->frame_obj->f_frame == frame);
-    frame->state = CONTROL_RESERVED;
-    _PyThreadState_AdjustControlLimit(tstate, 1);
-    _PyFrame_ClearExceptCode(frame, fp);
-    PyStackRef_CLEAR(frame->f_executable);
-    _PyThreadState_PopFrame(tstate, frame, fp);
-    _PyThreadState_AdjustControlLimit(tstate, -1);
+    // Pop the control record before clearing: finalizers run by the clear may
+    // push frames, and they must not see or be charged for the dying frame.
+    // A frame object, if any, takes its copy of the record while it is live.
+    PyFrameObject *f = FT_ATOMIC_LOAD_PTR_RELAXED(fp->frame_obj);
+    if (f != NULL) {
+        frame->state = CONTROL_RESERVED;
+        _PyThreadState_AdjustControlLimit(tstate, 1);
+        _PyFrame_ClearExceptCode(frame, fp);
+        PyStackRef_CLEAR(frame->f_executable);
+        _PyThreadState_PopFrame(tstate, frame, fp);
+        _PyThreadState_AdjustControlLimit(tstate, -1);
+        return;
+    }
+    _PyStackRef executable = frame->f_executable;
+    _PyStackRef *sp = frame->stackpointer;
+    _PyThreadState_PopControl(tstate, frame);
+    _PyStackRef *locals = fp->localsplus;
+    while (sp > locals) {
+        sp--;
+        PyStackRef_XCLOSE(*sp);
+    }
+    Py_CLEAR(fp->f_locals);
+    PyStackRef_CLEAR(fp->f_funcobj);
+    PyStackRef_CLOSE(executable);
+    _PyThreadState_PopDataFrame(tstate, fp);
 }
 
 static void
@@ -2091,15 +2110,14 @@ clear_gen_frame(PyThreadState *tstate, _PyControlRecord *frame,
     assert(tstate->exc_info == &gen->gi_exc_state);
     tstate->exc_info = gen->gi_exc_state.previous_item;
     gen->gi_exc_state.previous_item = NULL;
-    frame->state = CONTROL_DETACHED;
-    _PyThreadState_AdjustControlLimit(tstate, 1);
-    Py_BEGIN_CRITICAL_SECTION(gen);
     assert(fp->frame_obj == NULL || fp->frame_obj->f_frame == frame);
-    _PyFrame_ClearExceptCode(frame, fp);
+    // Save the state into the generator and pop the control record first,
+    // so finalizers run by the clear see a consistent control stack.
+    _PyGen_PopFrame(tstate, gen, frame);
+    Py_BEGIN_CRITICAL_SECTION(gen);
+    _PyFrame_ClearExceptCode(&gen->gi_iframe, fp);
     Py_END_CRITICAL_SECTION();
     _PyErr_ClearExcState(&gen->gi_exc_state);
-    _PyGen_PopFrame(tstate, gen, frame);
-    _PyThreadState_AdjustControlLimit(tstate, -1);
     // gh-143939: There must not be any escaping calls between setting
     // the generator return kind and returning from _PyEval_EvalFrame.
     ((_PyThreadStateImpl *)tstate)->generator_return_kind = GENERATOR_RETURN;

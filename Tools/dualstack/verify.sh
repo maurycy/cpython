@@ -29,11 +29,10 @@ else
     "$PY" -m test -j0 $CORE || status=1
 fi
 
-step "2. recursion table"
-if [ -f "$GOLDEN/recursion_baseline.json" ]; then
-    "$PY" "$HERE/recursion_table.py" --compare "$GOLDEN/recursion_baseline.json" || status=1
+step "2. recursion table (vs the unmodified prototype; recursion_baseline.json is the parent commit, informational)"
+if [ -f "$GOLDEN/recursion_proto.json" ]; then
+    "$PY" "$HERE/recursion_table.py" --compare "$GOLDEN/recursion_proto.json" || status=1
 else
-    echo "no $GOLDEN/recursion_baseline.json; record it with: BASELINE_PYTHON recursion_table.py --json ..."
     "$PY" "$HERE/recursion_table.py" || status=1
 fi
 

@@ -526,6 +526,8 @@ _PyThreadState_PushFrame(PyThreadState *tstate, size_t size);
 
 PyAPI_FUNC(void) _PyThreadState_PopFrame(
     PyThreadState *tstate, _PyControlRecord *frame, _PyInterpreterDataFrame *fp);
+PyAPI_FUNC(void) _PyThreadState_PopDataFrame(
+    PyThreadState *tstate, _PyInterpreterDataFrame *fp);
 
 /* Pushes a frame without checking for space.
  * Must be guarded by _PyThreadState_HasStackSpace()

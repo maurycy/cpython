@@ -3379,6 +3379,12 @@ _PyThreadState_PopFrame(PyThreadState *tstate, _PyControlRecord *frame,
     _PyThreadState_PopControl(tstate, frame);
 }
 
+void
+_PyThreadState_PopDataFrame(PyThreadState *tstate, _PyInterpreterDataFrame *fp)
+{
+    pop_data_stack(tstate, (_PyStackRef *)fp);
+}
+
 
 /* ---- Control stack verifier -------------------------------------------
  *
@@ -3574,8 +3580,9 @@ _PyThreadState_CheckControlStack(PyThreadState *tstate, int flags,
         if ((PyObject **)top_thread->data >= tstate->datastack_top) {
             CS_FAIL("T2: topmost thread data %p not below datastack_top %p", (void *)top_thread->data, (void *)tstate->datastack_top);
         }
-        if (chunk != tstate->datastack_chunk) {
-            CS_FAIL("T2: topmost thread data %p in chunk %p, current chunk %p", (void *)top_thread->data, (void *)chunk, (void *)tstate->datastack_chunk);
+        _PyStackChunk *current = tstate->datastack_chunk;
+        if (chunk != current && (current == NULL || chunk != current->previous)) {
+            CS_FAIL("T2: topmost thread data %p in chunk %p, current chunk %p", (void *)top_thread->data, (void *)chunk, (void *)current);
         }
     }
 

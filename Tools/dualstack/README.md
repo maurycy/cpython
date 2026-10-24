@@ -36,7 +36,7 @@ Invariants (ids appear in error messages):
 - R1 no `BASE` above slot 0; `DETACHED` only for a dying generator
 - R2 owner is one of the four known owners (poison is 0x5d)
 - T1 thread-owned `data` lies in a data stack chunk
-- T2 topmost thread-owned `data` lies in the current chunk below `datastack_top`
+- T2 topmost thread-owned `data` lies below `datastack_top`, in the current chunk or the one before it (a dying frame's data outlives its control record)
 - G1 `gen->gi_live_frame == record`, `gi_iframe` stays `DETACHED`, `gi_iframe.data == &gi_data`
 - G2 `gi_frame_state` is `EXECUTING` while linked (`CLEARED` when `DETACHED`)
 - E1 `ACTIVE` entry records point `data` into this thread's C stack
@@ -54,6 +54,8 @@ Strict mode is only meaningful from a plain Python frame: `gen.throw()` and
 ./python.exe Tools/dualstack/recursion_table.py --json out.json
 ./python.exe Tools/dualstack/recursion_table.py --compare golden/recursion_main.json
 ```
+
+`golden/recursion_proto.json` is the unmodified prototype (what `verify.sh` compares against); `golden/recursion_baseline.json` is the prototype's parent commit.
 
 Each scenario runs in a fresh interpreter with `sys.setrecursionlimit(1000)`
 and reports the depth at which `RecursionError` fires, or `CRASH`. Any change
