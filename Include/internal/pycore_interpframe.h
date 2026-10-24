@@ -439,10 +439,25 @@ _PyThreadState_AdjustControlLimit(PyThreadState *tstate, int delta)
 
 PyAPI_FUNC(_PyControlRecord *) _PyThreadState_PushControlSlow(PyThreadState *tstate);
 
+/* Control stack verifier (Tools/dualstack). Returns 0 when every invariant
+ * holds, -1 with a description in buf otherwise. */
+#define _PY_CONTROLSTACK_CHECK_STRICT 1  /* extra == number of entry records */
+#define _PY_CONTROLSTACK_CHECK_WINDOW 2  /* only inspect the top records */
+#define _PY_CONTROLSTACK_CHECK_IDLE 4    /* an empty stack must have extra == 0 */
+PyAPI_FUNC(int) _PyThreadState_CheckControlStack(
+    PyThreadState *tstate, int flags, char *buf, size_t buflen);
+#ifdef Py_DEBUG
+PyAPI_FUNC(void) _PyThreadState_ControlStackHook(PyThreadState *tstate, const char *where);
+#  define _Py_CONTROLSTACK_HOOK(tstate, where) _PyThreadState_ControlStackHook((tstate), (where))
+#else
+#  define _Py_CONTROLSTACK_HOOK(tstate, where) ((void)0)
+#endif
+
 static inline _PyControlRecord *
 _PyThreadState_PushControlUnchecked(PyThreadState *tstate)
 {
     assert(_PyThreadState_HasControlSpace(tstate, 1));
+    _Py_CONTROLSTACK_HOOK(tstate, "push");
     _PyControlRecord *frame = tstate->controlstack_top++;
     frame->state = CONTROL_RESERVED;
     return frame;
@@ -462,6 +477,15 @@ _PyThreadState_PopControl(PyThreadState *tstate, _PyControlRecord *frame)
 {
     assert(frame + 1 == tstate->controlstack_top);
     tstate->controlstack_top = frame;
+#ifdef Py_DEBUG
+    frame->f_executable = PyStackRef_NULL;
+    frame->instr_ptr = (_Py_CODEUNIT *)(uintptr_t)0xDDDDDDDDDDDDDDD0ULL;
+    frame->stackpointer = (_PyStackRef *)(uintptr_t)0xDDDDDDDDDDDDDDD8ULL;
+    frame->data = (_PyInterpreterDataFrame *)(uintptr_t)0xDDDDDDDDDDDDDDE0ULL;
+    frame->owner = (char)0x5d;
+    frame->state = CONTROL_DETACHED;
+    _Py_CONTROLSTACK_HOOK(tstate, "pop");
+#endif
 }
 
 static inline _PyControlRecord *
@@ -483,6 +507,7 @@ _PyThreadState_PopEntry(PyThreadState *tstate, _PyControlRecord *entry)
 {
     _PyThreadState_PopControl(tstate, entry);
     _PyThreadState_AdjustControlLimit(tstate, -1);
+    _Py_CONTROLSTACK_HOOK(tstate, "pop-entry");
 }
 
 static inline _PyControlRecord *
