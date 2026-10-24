@@ -93,6 +93,39 @@ _PyGen_PushFrame(PyThreadState *tstate, PyGenObject *gen)
     return frame;
 }
 
+/* Resuming a generator from C needs an interpreter entry record and the
+   generator record. Reserve both with one bounds check; fall back to the
+   two separate pushes when the committed region must grow. On failure
+   nothing stays pushed and *entry is NULL. */
+static inline _PyControlRecord *
+_PyGen_PushEntryAndFrame(PyThreadState *tstate, PyGenObject *gen,
+                         _PyControlRecord **entry)
+{
+    assert(gen->gi_live_frame == &gen->gi_iframe);
+    if (_PyThreadState_HasControlSpace(tstate, 2)) {
+        _PyThreadState_AdjustControlLimit(tstate, 1);
+        _PyControlRecord *e = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
+        e->owner = FRAME_OWNED_BY_INTERPRETER;
+        _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
+        _PyGen_LinkFrame(gen, frame, NULL, CONTROL_RESERVED);
+        *entry = e;
+        return frame;
+    }
+    _PyControlRecord *e = _PyThreadState_PushEntry(tstate);
+    if (e == NULL) {
+        *entry = NULL;
+        return NULL;
+    }
+    _PyControlRecord *frame = _PyGen_PushFrame(tstate, gen);
+    if (frame == NULL) {
+        _PyThreadState_PopEntry(tstate, e);
+        *entry = NULL;
+        return NULL;
+    }
+    *entry = e;
+    return frame;
+}
+
 static inline void
 _PyGen_PopFrame(PyThreadState *tstate, PyGenObject *gen, _PyControlRecord *frame)
 {

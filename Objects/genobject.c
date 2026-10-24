@@ -264,12 +264,9 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
     assert(FT_ATOMIC_LOAD_INT8_RELAXED(gen->gi_frame_state) == FRAME_EXECUTING);
 
     PyThreadState *tstate = _PyThreadState_GET();
-    _PyControlRecord *entry = _PyThreadState_PushEntry(tstate);
-    _PyControlRecord *frame = entry == NULL ? NULL : _PyGen_PushFrame(tstate, gen);
+    _PyControlRecord *entry;
+    _PyControlRecord *frame = _PyGen_PushEntryAndFrame(tstate, gen, &entry);
     if (frame == NULL) {
-        if (entry != NULL) {
-            _PyThreadState_PopEntry(tstate, entry);
-        }
         FT_ATOMIC_STORE_INT8_RELEASE(gen->gi_frame_state, FRAME_CLEARED);
         gen_clear_frame(gen);
         *presult = NULL;
