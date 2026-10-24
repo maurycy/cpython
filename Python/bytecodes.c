@@ -4603,7 +4603,7 @@ dummy_func(
             SAVE_STACK();
             assert(_PyFrame_GetCaller(temp) == frame || _PyFrame_GetCaller(_PyFrame_GetCaller(temp)) == frame);
             CALL_STAT_INC(inlined_py_calls);
-            temp->state = CONTROL_ACTIVE;
+            assert(temp->state == CONTROL_ACTIVE);
             frame = tstate->current_frame = temp;
             fp = frame->data;
             RELOAD_STACK();
@@ -5825,8 +5825,9 @@ dummy_func(
             gen_frame->owner = FRAME_OWNED_BY_GENERATOR;
             _PyControlRecord *prev = _PyFrame_GetCaller(frame);
             _PyThreadState_UpdateLastProfiledFrame(tstate, frame, prev);
+            tstate->current_frame = prev;
             _PyThreadState_PopFrame(tstate, frame, fp);
-            frame = tstate->current_frame = prev;
+            frame = prev;
             fp = frame->data;
             LOAD_IP(frame->return_offset);
             RELOAD_STACK();

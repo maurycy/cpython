@@ -53,8 +53,8 @@ struct _PyControlRecord {
 #endif
     uint16_t return_offset;  /* Only relevant during a function call */
     char owner;
+    uint8_t state; /* enum _controlstate; a whole byte so readers can use offsetof() */
     uint8_t visited:1;
-    uint8_t state:2;
 #ifdef Py_DEBUG
     uint8_t stackpointer_valid:1;
     uint8_t lltrace:5;

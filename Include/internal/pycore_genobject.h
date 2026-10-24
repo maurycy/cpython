@@ -28,33 +28,25 @@ _PyGen_FinalizerIsNoop(PyObject *op)
         FRAME_STATE_FINISHED(((PyGenObject *)op)->gi_frame_state);
 }
 #ifdef Py_GIL_DISABLED
-PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value);
+PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state);
 PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
 #else
+/* gi_iframe is a complete DETACHED record, so restoring is one struct copy.
+   The stack pointer is kept in a register across the copy so pushing the
+   sent value does not reload it from the bytes just written. */
 static inline void
-_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value)
+_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state)
 {
-    const _PyControlRecord *saved = &gen->gi_iframe;
-    unsigned int visited = saved->visited;
-#ifdef Py_DEBUG
-    unsigned int stackpointer_valid = saved->stackpointer_valid;
-    unsigned int lltrace = saved->lltrace;
-#endif
-    frame->f_executable = saved->f_executable;
-    frame->instr_ptr = saved->instr_ptr;
-    frame->stackpointer = saved->stackpointer;
-    frame->data = &gen->gi_data;
+    assert(gen->gi_iframe.state == CONTROL_DETACHED);
+    assert(gen->gi_iframe.data == &gen->gi_data);
+    assert(gen->gi_iframe.owner == FRAME_OWNED_BY_GENERATOR);
+    _PyStackRef *sp = gen->gi_iframe.stackpointer;
+    *frame = gen->gi_iframe;
+    frame->state = (uint8_t)state;
     if (value != NULL) {
-        *frame->stackpointer++ = *value;
+        *sp++ = *value;
+        frame->stackpointer = sp;
     }
-    frame->state = CONTROL_RESERVED;
-    frame->return_offset = saved->return_offset;
-    frame->owner = FRAME_OWNED_BY_GENERATOR;
-    frame->visited = visited;
-#ifdef Py_DEBUG
-    frame->stackpointer_valid = stackpointer_valid;
-    frame->lltrace = lltrace;
-#endif
     PyFrameObject *f = gen->gi_data.frame_obj;
     if (f != NULL) {
         f->f_frame = frame;
@@ -84,8 +76,9 @@ static inline _PyControlRecord *
 _PyGen_PushFrameUnchecked(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value)
 {
     assert(gen->gi_live_frame == &gen->gi_iframe);
-    _PyControlRecord *frame = _PyThreadState_PushControlUnchecked(tstate);
-    _PyGen_LinkFrame(gen, frame, &value);
+    // Inlined resume: published ACTIVE, nothing runs before _PUSH_FRAME.
+    _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
+    _PyGen_LinkFrame(gen, frame, &value, CONTROL_ACTIVE);
     return frame;
 }
 
@@ -95,8 +88,41 @@ _PyGen_PushFrame(PyThreadState *tstate, PyGenObject *gen)
     assert(gen->gi_live_frame == &gen->gi_iframe);
     _PyControlRecord *frame = _PyThreadState_PushControl(tstate);
     if (frame != NULL) {
-        _PyGen_LinkFrame(gen, frame, NULL);
+        _PyGen_LinkFrame(gen, frame, NULL, CONTROL_RESERVED);
     }
+    return frame;
+}
+
+/* Resuming a generator from C needs an interpreter entry record and the
+   generator record. Reserve both with one bounds check; fall back to the
+   two separate pushes when the committed region must grow. On failure
+   nothing stays pushed and *entry is NULL. */
+static inline _PyControlRecord *
+_PyGen_PushEntryAndFrame(PyThreadState *tstate, PyGenObject *gen,
+                         _PyControlRecord **entry)
+{
+    assert(gen->gi_live_frame == &gen->gi_iframe);
+    if (_PyThreadState_HasControlSpace(tstate, 2)) {
+        _PyThreadState_AdjustControlLimit(tstate, 1);
+        _PyControlRecord *e = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
+        e->owner = FRAME_OWNED_BY_INTERPRETER;
+        _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
+        _PyGen_LinkFrame(gen, frame, NULL, CONTROL_RESERVED);
+        *entry = e;
+        return frame;
+    }
+    _PyControlRecord *e = _PyThreadState_PushEntry(tstate);
+    if (e == NULL) {
+        *entry = NULL;
+        return NULL;
+    }
+    _PyControlRecord *frame = _PyGen_PushFrame(tstate, gen);
+    if (frame == NULL) {
+        _PyThreadState_PopEntry(tstate, e);
+        *entry = NULL;
+        return NULL;
+    }
+    *entry = e;
     return frame;
 }
 

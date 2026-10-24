@@ -300,10 +300,14 @@ static inline _PyControlRecord *
 _PyFrame_GetCaller(_PyControlRecord *frame)
 {
     assert(frame->state != CONTROL_DETACHED && frame->state != CONTROL_BASE);
+    _PyControlRecord *caller = frame - 1;
+    if (caller->state >= CONTROL_ACTIVE) {
+        return caller;
+    }
     do {
-        --frame;
-    } while (frame->state < CONTROL_ACTIVE);
-    return frame;
+        --caller;
+    } while (caller->state < CONTROL_ACTIVE);
+    return caller;
 }
 
 static inline _PyControlRecord *
@@ -404,9 +408,14 @@ _PyThreadState_HasControlSpace(PyThreadState *tstate, int frames)
 static inline bool
 _PyThreadState_HasStackSpace(PyThreadState *tstate, int size)
 {
-    return _PyThreadState_HasControlSpace(tstate, 2) &&
-        tstate->datastack_top != NULL &&
-        size < tstate->datastack_limit - tstate->datastack_top;
+    if (tstate->datastack_top == NULL) {
+        return false;
+    }
+    /* Evaluate both bounds without short-circuiting so the compiler can
+       fold them into one conditional compare instead of two branches. */
+    bool control = _PyThreadState_HasControlSpace(tstate, 2);
+    bool data = size < tstate->datastack_limit - tstate->datastack_top;
+    return control & data;
 }
 
 static inline Py_ssize_t
@@ -439,20 +448,46 @@ _PyThreadState_AdjustControlLimit(PyThreadState *tstate, int delta)
 
 PyAPI_FUNC(_PyControlRecord *) _PyThreadState_PushControlSlow(PyThreadState *tstate);
 
+/* Control stack verifier (Tools/dualstack). Returns 0 when every invariant
+ * holds, -1 with a description in buf otherwise. */
+#define _PY_CONTROLSTACK_CHECK_STRICT 1  /* extra == number of entry records */
+#define _PY_CONTROLSTACK_CHECK_WINDOW 2  /* only inspect the top records */
+#define _PY_CONTROLSTACK_CHECK_IDLE 4    /* an empty stack must have extra == 0 */
+PyAPI_FUNC(int) _PyThreadState_CheckControlStack(
+    PyThreadState *tstate, int flags, char *buf, size_t buflen);
+#ifdef Py_DEBUG
+PyAPI_FUNC(void) _PyThreadState_ControlStackHook(PyThreadState *tstate, const char *where);
+#  define _Py_CONTROLSTACK_HOOK(tstate, where) _PyThreadState_ControlStackHook((tstate), (where))
+#else
+#  define _Py_CONTROLSTACK_HOOK(tstate, where) ((void)0)
+#endif
+
+/* Takes the next control slot without writing anything into it. The caller
+   must fill the record, including its state, before any code that could
+   walk the stack runs. */
 static inline _PyControlRecord *
-_PyThreadState_PushControlUnchecked(PyThreadState *tstate)
+_PyThreadState_ReserveControlUnchecked(PyThreadState *tstate)
 {
     assert(_PyThreadState_HasControlSpace(tstate, 1));
-    _PyControlRecord *frame = tstate->controlstack_top++;
-    frame->state = CONTROL_RESERVED;
+    _Py_CONTROLSTACK_HOOK(tstate, "push");
+    return tstate->controlstack_top++;
+}
+
+static inline _PyControlRecord *
+_PyThreadState_PushControlUnchecked(PyThreadState *tstate, int state)
+{
+    _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
+    frame->state = (uint8_t)state;
     return frame;
 }
 
+/* Reserved-state push for paths that activate the record later
+   (interpreter entries, trampolines, frames evaluated from C). */
 static inline _PyControlRecord *
 _PyThreadState_PushControl(PyThreadState *tstate)
 {
     if (_PyThreadState_HasControlSpace(tstate, 1)) {
-        return _PyThreadState_PushControlUnchecked(tstate);
+        return _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
     }
     return _PyThreadState_PushControlSlow(tstate);
 }
@@ -462,6 +497,15 @@ _PyThreadState_PopControl(PyThreadState *tstate, _PyControlRecord *frame)
 {
     assert(frame + 1 == tstate->controlstack_top);
     tstate->controlstack_top = frame;
+#ifdef Py_DEBUG
+    frame->f_executable = PyStackRef_NULL;
+    frame->instr_ptr = (_Py_CODEUNIT *)(uintptr_t)0xDDDDDDDDDDDDDDD0ULL;
+    frame->stackpointer = (_PyStackRef *)(uintptr_t)0xDDDDDDDDDDDDDDD8ULL;
+    frame->data = (_PyInterpreterDataFrame *)(uintptr_t)0xDDDDDDDDDDDDDDE0ULL;
+    frame->owner = (char)0x5d;
+    frame->state = CONTROL_DETACHED;
+    _Py_CONTROLSTACK_HOOK(tstate, "pop");
+#endif
 }
 
 static inline _PyControlRecord *
@@ -483,12 +527,15 @@ _PyThreadState_PopEntry(PyThreadState *tstate, _PyControlRecord *entry)
 {
     _PyThreadState_PopControl(tstate, entry);
     _PyThreadState_AdjustControlLimit(tstate, -1);
+    _Py_CONTROLSTACK_HOOK(tstate, "pop-entry");
 }
 
+/* Inlined Python-to-Python calls: nothing can run between this push and
+   _PUSH_FRAME, so the record is published ACTIVE right away. */
 static inline _PyControlRecord *
 _PyThreadState_PushFrameUnchecked(PyThreadState *tstate, int nslots)
 {
-    _PyControlRecord *frame = _PyThreadState_PushControlUnchecked(tstate);
+    _PyControlRecord *frame = _PyThreadState_PushControlUnchecked(tstate, CONTROL_ACTIVE);
     frame->data = (_PyInterpreterDataFrame *)tstate->datastack_top;
     tstate->datastack_top += nslots;
     assert(tstate->datastack_top <= tstate->datastack_limit);
@@ -501,6 +548,8 @@ _PyThreadState_PushFrame(PyThreadState *tstate, size_t size);
 
 PyAPI_FUNC(void) _PyThreadState_PopFrame(
     PyThreadState *tstate, _PyControlRecord *frame, _PyInterpreterDataFrame *fp);
+PyAPI_FUNC(void) _PyThreadState_PopDataFrame(
+    PyThreadState *tstate, _PyInterpreterDataFrame *fp);
 
 /* Pushes a frame without checking for space.
  * Must be guarded by _PyThreadState_HasStackSpace()
