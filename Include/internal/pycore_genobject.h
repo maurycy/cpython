@@ -31,19 +31,30 @@ _PyGen_FinalizerIsNoop(PyObject *op)
 PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value);
 PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
 #else
-/* gi_iframe is a complete, DETACHED record (executable, data, owner and the
-   saved instruction and stack pointers), so resuming is one struct copy. */
 static inline void
 _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value)
 {
-    assert(gen->gi_iframe.state == CONTROL_DETACHED);
-    assert(gen->gi_iframe.data == &gen->gi_data);
-    assert(gen->gi_iframe.owner == FRAME_OWNED_BY_GENERATOR);
-    *frame = gen->gi_iframe;
-    frame->state = CONTROL_RESERVED;
+    const _PyControlRecord *saved = &gen->gi_iframe;
+    unsigned int visited = saved->visited;
+#ifdef Py_DEBUG
+    unsigned int stackpointer_valid = saved->stackpointer_valid;
+    unsigned int lltrace = saved->lltrace;
+#endif
+    frame->f_executable = saved->f_executable;
+    frame->instr_ptr = saved->instr_ptr;
+    frame->stackpointer = saved->stackpointer;
+    frame->data = &gen->gi_data;
     if (value != NULL) {
         *frame->stackpointer++ = *value;
     }
+    frame->state = CONTROL_RESERVED;
+    frame->return_offset = saved->return_offset;
+    frame->owner = FRAME_OWNED_BY_GENERATOR;
+    frame->visited = visited;
+#ifdef Py_DEBUG
+    frame->stackpointer_valid = stackpointer_valid;
+    frame->lltrace = lltrace;
+#endif
     PyFrameObject *f = gen->gi_data.frame_obj;
     if (f != NULL) {
         f->f_frame = frame;
@@ -56,6 +67,7 @@ _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 {
     gen->gi_iframe.instr_ptr = frame->instr_ptr;
     gen->gi_iframe.stackpointer = frame->stackpointer;
+    gen->gi_iframe.return_offset = frame->return_offset;
 #ifdef Py_DEBUG
     gen->gi_iframe.stackpointer_valid = frame->stackpointer_valid;
     gen->gi_iframe.lltrace = frame->lltrace;
