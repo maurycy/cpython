@@ -71,17 +71,27 @@ _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, 
     gen->gi_live_frame = frame;
 }
 
+/* Saving the live record: read every field from the slot before the
+   first store into the generator, for the same aliasing reason as in
+   _PyGen_LinkFrame. */
 static inline void
 _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 {
-    gen->gi_iframe.instr_ptr = frame->instr_ptr;
-    gen->gi_iframe.stackpointer = frame->stackpointer;
-    gen->gi_iframe.return_offset = frame->return_offset;
+    _Py_CODEUNIT *ip = frame->instr_ptr;
+    _PyStackRef *sp = frame->stackpointer;
+    uint16_t return_offset = frame->return_offset;
 #ifdef Py_DEBUG
-    gen->gi_iframe.stackpointer_valid = frame->stackpointer_valid;
-    gen->gi_iframe.lltrace = frame->lltrace;
+    uint8_t stackpointer_valid = frame->stackpointer_valid;
+    uint8_t lltrace = frame->lltrace;
 #endif
     PyFrameObject *f = gen->gi_data.frame_obj;
+    gen->gi_iframe.instr_ptr = ip;
+    gen->gi_iframe.stackpointer = sp;
+    gen->gi_iframe.return_offset = return_offset;
+#ifdef Py_DEBUG
+    gen->gi_iframe.stackpointer_valid = stackpointer_valid;
+    gen->gi_iframe.lltrace = lltrace;
+#endif
     if (f != NULL) {
         f->f_frame = &gen->gi_iframe;
     }
