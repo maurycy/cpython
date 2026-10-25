@@ -208,6 +208,37 @@ _PyGen_PopFrame(PyThreadState *tstate, PyGenObject *gen, _PyControlRecord *frame
     _PyThreadState_PopControl(tstate, frame);
 }
 
+#ifndef Py_GIL_DISABLED
+/* Pop and clear the record of a generator that has just finished and has
+   no frame object. Nothing will resume it, so the saved record keeps only
+   what inspection needs (code, data, owner, DETACHED state, an in-range
+   stack pointer); the live stack pointer is read once, before the pop, and
+   used directly to clear the locals instead of being saved and reloaded.
+   Finalizers run by the clears see the record already popped. */
+static inline void
+_PyGen_PopFrameFinished(PyThreadState *tstate, PyGenObject *gen,
+                        _PyControlRecord *frame, _PyInterpreterDataFrame *fp)
+{
+    assert(gen->gi_live_frame == frame);
+    assert(fp->frame_obj == NULL);
+    assert(fp == &gen->gi_data);
+    _PyStackRef *sp = frame->stackpointer;
+    _PyStackRef *locals = fp->localsplus;
+    gen->gi_iframe.stackpointer = locals;
+#ifdef Py_DEBUG
+    gen->gi_iframe.stackpointer_valid = 1;
+#endif
+    gen->gi_live_frame = &gen->gi_iframe;
+    _PyThreadState_PopControl(tstate, frame);
+    while (sp > locals) {
+        sp--;
+        PyStackRef_XCLOSE(*sp);
+    }
+    Py_CLEAR(fp->f_locals);
+    PyStackRef_CLEAR(fp->f_funcobj);
+}
+#endif
+
 PyAPI_FUNC(PyObject *)_PyGen_yf(PyGenObject *);
 extern int _PyGen_ClearFrame(PyGenObject *self);
 

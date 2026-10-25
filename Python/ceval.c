@@ -2146,12 +2146,20 @@ clear_gen_frame(PyThreadState *tstate, _PyControlRecord *frame,
     tstate->exc_info = gen->gi_exc_state.previous_item;
     gen->gi_exc_state.previous_item = NULL;
     assert(fp->frame_obj == NULL || fp->frame_obj->f_frame == frame);
-    // Save the state into the generator and pop the control record first,
-    // so finalizers run by the clear see a consistent control stack.
-    _PyGen_PopFrame(tstate, gen, frame);
-    Py_BEGIN_CRITICAL_SECTION(gen);
-    _PyFrame_ClearExceptCode(&gen->gi_iframe, fp);
-    Py_END_CRITICAL_SECTION();
+#ifndef Py_GIL_DISABLED
+    if (fp->frame_obj == NULL) {
+        _PyGen_PopFrameFinished(tstate, gen, frame, fp);
+    }
+    else
+#endif
+    {
+        // Save the state into the generator and pop the control record first,
+        // so finalizers run by the clear see a consistent control stack.
+        _PyGen_PopFrame(tstate, gen, frame);
+        Py_BEGIN_CRITICAL_SECTION(gen);
+        _PyFrame_ClearExceptCode(&gen->gi_iframe, fp);
+        Py_END_CRITICAL_SECTION();
+    }
     _PyErr_ClearExcState(&gen->gi_exc_state);
     // gh-143939: There must not be any escaping calls between setting
     // the generator return kind and returning from _PyEval_EvalFrame.
