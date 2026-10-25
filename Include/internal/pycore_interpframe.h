@@ -607,6 +607,10 @@ _PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
                         PyObject *locals, _PyStackRef const *args,
                         size_t argcount, PyObject *kwnames);
 
+PyAPI_FUNC(PyObject *) _PyEval_MakeGeneratorInPlace(
+    PyThreadState *tstate, _PyStackRef callable, _PyStackRef self_or_null,
+    _PyStackRef *args, int oparg);
+
 PyAPI_FUNC(_PyControlRecord *)
 _PyEvalFramePushAndInit_Ex(PyThreadState *tstate, _PyStackRef func,
     PyObject *locals, Py_ssize_t nargs, PyObject *callargs, PyObject *kwargs);

@@ -4311,6 +4311,7 @@ dummy_func(
         family(CALL, INLINE_CACHE_ENTRIES_CALL) = {
             CALL_BOUND_METHOD_EXACT_ARGS,
             CALL_PY_EXACT_ARGS,
+            CALL_PY_GEN_EXACT_ARGS,
             CALL_TYPE_1,
             CALL_STR_1,
             CALL_TUPLE_1,
@@ -4633,6 +4634,32 @@ dummy_func(
             _INIT_CALL_PY_EXACT_ARGS +
             _SAVE_RETURN_OFFSET +
             _PUSH_FRAME;
+
+        /* Calling a generator function creates the generator and returns
+           it at once. Instead of pushing a frame whose first instruction
+           is RETURN_GENERATOR and copying it into the generator, build the
+           saved record and data frame in place. Codes that start with
+           MAKE_CELL or COPY_FREE_VARS are not specialised this way. */
+        op(_INIT_CALL_PY_GEN_EXACT_ARGS, (callable, self_or_null, args[oparg] -- res)) {
+            PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(callable);
+            PyCodeObject *code = (PyCodeObject *)func->func_code;
+            DEOPT_IF((code->co_flags & CO_COROUTINE) &&
+                     tstate->coroutine_origin_tracking_depth != 0);
+            STAT_INC(CALL, hit);
+            PyObject *gen = _PyEval_MakeGeneratorInPlace(tstate, callable, self_or_null, args, oparg);
+            INPUTS_DEAD();
+            ERROR_IF(gen == NULL);
+            res = PyStackRef_FromPyObjectStealMortal(gen);
+        }
+
+        macro(CALL_PY_GEN_EXACT_ARGS) =
+            _RECORD_CALLABLE +
+            unused/1 + // Skip over the counter
+            _CHECK_PEP_523 +
+            _CHECK_FUNCTION_VERSION +
+            _CHECK_FUNCTION_EXACT_ARGS +
+            _CHECK_STACK_SPACE +
+            _INIT_CALL_PY_GEN_EXACT_ARGS;
 
         op(_GUARD_NOS_NULL, (null, unused -- null, unused)) {
             EXIT_IF(!PyStackRef_IsNull(null));

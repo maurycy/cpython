@@ -2138,6 +2138,47 @@ _PyEval_FrameClearAndPop(
     }
 }
 
+/* Create the generator that calling `callable` with these arguments would
+   return, without pushing a frame and running RETURN_GENERATOR. The code
+   must start with RETURN_GENERATOR. Consumes every reference; returns NULL
+   with an exception set. */
+PyObject *
+_PyEval_MakeGeneratorInPlace(PyThreadState *tstate, _PyStackRef callable,
+                             _PyStackRef self_or_null, _PyStackRef *args,
+                             int oparg)
+{
+    PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(callable);
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    assert(_PyCode_CODE(code)->op.code == RETURN_GENERATOR);
+    PyGenObject *gen = (PyGenObject *)_Py_MakeCoro(func);
+    if (gen == NULL) {
+        for (int i = oparg - 1; i >= 0; i--) {
+            PyStackRef_CLOSE(args[i]);
+        }
+        PyStackRef_XCLOSE(self_or_null);
+        PyStackRef_CLOSE(callable);
+        return NULL;
+    }
+    int has_self = !PyStackRef_IsNull(self_or_null);
+    _PyControlRecord *gen_frame = &gen->gi_iframe;
+    _PyInterpreterDataFrame *gen_data = &gen->gi_data;
+    _PyFrame_Initialize(tstate, gen_frame, gen_data,
+                        PyStackRef_MakeHeapSafe(callable), NULL, code,
+                        oparg + has_self);
+    gen_frame->instr_ptr++;
+    gen_frame->owner = FRAME_OWNED_BY_GENERATOR;
+    gen_frame->state = CONTROL_DETACHED;
+    _PyStackRef *first_non_self_local = gen_data->localsplus + has_self;
+    if (has_self) {
+        gen_data->localsplus[0] = self_or_null;
+    }
+    for (int i = 0; i < oparg; i++) {
+        first_non_self_local[i] = PyStackRef_MakeHeapSafe(args[i]);
+    }
+    gen->gi_frame_state = FRAME_CREATED;
+    return (PyObject *)gen;
+}
+
 /* Consumes references to func, locals and all the args */
 _PyControlRecord *
 _PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
@@ -2263,11 +2304,29 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
                PyObject* const* args, size_t argcount,
                PyObject *kwnames)
 {
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    if (kwnames == NULL && locals == NULL && argcount <= 8 &&
+        argcount == (size_t)code->co_argcount &&
+        code->co_kwonlyargcount == 0 &&
+        (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0 &&
+        _PyCode_CODE(code)->op.code == RETURN_GENERATOR &&
+        !((code->co_flags & CO_COROUTINE) &&
+          tstate->coroutine_origin_tracking_depth != 0) &&
+        _PyThreadState_HasStackSpace(tstate, code->co_framesize))
+    {
+        /* Generator function: build the generator in place. */
+        _PyStackRef refs[8];
+        for (size_t i = 0; i < argcount; i++) {
+            refs[i] = PyStackRef_FromPyObjectNew(args[i]);
+        }
+        return _PyEval_MakeGeneratorInPlace(
+            tstate, PyStackRef_FromPyObjectNew(func), PyStackRef_NULL,
+            refs, (int)argcount);
+    }
     _PyControlRecord *entry = _PyThreadState_PushEntry(tstate);
     if (entry == NULL) {
         return NULL;
     }
-    PyCodeObject *code = (PyCodeObject *)func->func_code;
     if (kwnames == NULL && argcount == (size_t)code->co_argcount &&
         code->co_kwonlyargcount == 0 &&
         (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0)
