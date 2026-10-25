@@ -14,6 +14,7 @@ extern "C" {
 #include "opcode_ids.h"           // RESUME_CHECK
 
 #include <stddef.h>               // offsetof()
+#include <string.h>               // memcpy()
 
 
 static inline
@@ -42,13 +43,27 @@ _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, 
     assert(gen->gi_iframe.state == CONTROL_DETACHED);
     assert(gen->gi_iframe.data == &gen->gi_data);
     assert(gen->gi_iframe.owner == FRAME_OWNED_BY_GENERATOR);
-    _PyStackRef *sp = gen->gi_iframe.stackpointer;
-    *frame = gen->gi_iframe;
-    frame->state = (uint8_t)state;
+    /* Read the whole saved record into registers before the first store
+       to the slot: when the two share the low 12 bits of their addresses,
+       a load issued after a store to the other one waits for that store
+       to retire (4K aliasing). Five scalar words keep gcc from spilling. */
+    uint64_t w0, w1, w2, w3, w4;
+    memcpy(&w0, (const char *)&gen->gi_iframe + 0, 8);
+    memcpy(&w1, (const char *)&gen->gi_iframe + 8, 8);
+    memcpy(&w2, (const char *)&gen->gi_iframe + 16, 8);
+    memcpy(&w3, (const char *)&gen->gi_iframe + 24, 8);
+    memcpy(&w4, (const char *)&gen->gi_iframe + 32, 8);
+    _PyStackRef *sp = (_PyStackRef *)(uintptr_t)w2;
     if (value != NULL) {
         *sp++ = *value;
-        frame->stackpointer = sp;
+        w2 = (uint64_t)(uintptr_t)sp;
     }
+    memcpy((char *)frame + 0, &w0, 8);
+    memcpy((char *)frame + 8, &w1, 8);
+    memcpy((char *)frame + 16, &w2, 8);
+    memcpy((char *)frame + 24, &w3, 8);
+    memcpy((char *)frame + 32, &w4, 8);
+    frame->state = (uint8_t)state;
     PyFrameObject *f = gen->gi_data.frame_obj;
     if (f != NULL) {
         f->f_frame = frame;
