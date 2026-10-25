@@ -3414,7 +3414,7 @@ _PyThreadState_PopDataFrame(PyThreadState *tstate, _PyInterpreterDataFrame *fp)
  *  T2 the topmost thread-owned data lies in the current chunk below datastack_top
  *  G1 gen->gi_live_frame == record, gi_iframe stays DETACHED, gi_iframe.data == &gi_data
  *  G2 gi_frame_state is EXECUTING while linked (CLEARED when DETACHED)
- *  E1 ACTIVE entry records point their data into this thread's C stack
+ *  E1 entry records have data in a data stack chunk; ACTIVE ones keep a C stack anchor in f_locals
  *  F1 data->frame_obj->f_frame == record when a frame object exists
  *  S1 (debug) stackpointer within [localsplus, localsplus + nlocalsplus + stacksize]
  *  X1 extra >= number of entry records; == in STRICT mode
@@ -3549,10 +3549,13 @@ _PyThreadState_CheckControlStack(PyThreadState *tstate, int flags,
         }
         case FRAME_OWNED_BY_INTERPRETER:
             n_entries++;
+            if (r->data == NULL || !data_in_datastack(tstate, r->data, NULL)) {
+                CS_FAIL("E1: slot %zd entry data %p not in any data stack chunk", i, (void *)r->data);
+            }
             if (st == CONTROL_ACTIVE && ts->c_stack_top != 0 && sp_here < ts->c_stack_top) {
-                uintptr_t d = (uintptr_t)r->data;
+                uintptr_t d = (uintptr_t)r->data->f_locals;
                 if (d <= sp_here || d > ts->c_stack_top) {
-                    CS_FAIL("E1: slot %zd entry data %p not in C stack (%p, %p]", i, (void *)d, (void *)sp_here, (void *)ts->c_stack_top);
+                    CS_FAIL("E1: slot %zd entry anchor %p not in C stack (%p, %p]", i, (void *)d, (void *)sp_here, (void *)ts->c_stack_top);
                 }
             }
             break;

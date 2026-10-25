@@ -39,7 +39,7 @@ Invariants (ids appear in error messages):
 - T2 topmost thread-owned `data` lies below `datastack_top`, in the current chunk or the one before it (a dying frame's data outlives its control record)
 - G1 `gen->gi_live_frame == record`, `gi_iframe` stays `DETACHED`, `gi_iframe.data == &gi_data`
 - G2 `gi_frame_state` is `EXECUTING` while linked (`CLEARED` when `DETACHED`)
-- E1 `ACTIVE` entry records point `data` into this thread's C stack
+- E1 entry records have `data` in a data stack chunk; `ACTIVE` ones keep a C stack anchor in `data->f_locals`
 - F1 `data->frame_obj->f_frame == record`
 - S1 (debug) `stackpointer` within `[localsplus, localsplus + nlocalsplus + stacksize]`
 - X1 `extra >= #entry records` (`==` in strict mode and whenever the stack is empty)

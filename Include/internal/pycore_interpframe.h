@@ -515,15 +515,54 @@ _PyThreadState_PopControl(PyThreadState *tstate, _PyControlRecord *frame)
 #endif
 }
 
+// Exported for external JIT support
+PyAPI_FUNC(_PyControlRecord *)
+_PyThreadState_PushFrame(PyThreadState *tstate, size_t size);
+
+PyAPI_FUNC(void) _PyThreadState_PopFrame(
+    PyThreadState *tstate, _PyControlRecord *frame, _PyInterpreterDataFrame *fp);
+
+/* An interpreter entry record owns a small data frame on the data stack
+   (header plus one value slot for the result), so its address depends on
+   the stack depth and not on the C stack layout of the eval loop. */
+#define _PY_ENTRY_DATA_SLOTS \
+    ((int)((sizeof(_PyInterpreterDataFrame) + sizeof(_PyStackRef)) / sizeof(_PyStackRef)))
+
+static inline bool
+_PyThreadState_HasEntrySpace(PyThreadState *tstate, int extra_slots)
+{
+    return tstate->datastack_top != NULL &&
+        _PY_ENTRY_DATA_SLOTS + extra_slots <
+            tstate->datastack_limit - tstate->datastack_top;
+}
+
+/* Caller has checked one control slot and _PY_ENTRY_DATA_SLOTS of data
+   space, and has adjusted the control limit. */
+static inline _PyControlRecord *
+_PyThreadState_PushEntryUnchecked(PyThreadState *tstate)
+{
+    _PyControlRecord *entry = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
+    entry->data = (_PyInterpreterDataFrame *)tstate->datastack_top;
+    tstate->datastack_top += _PY_ENTRY_DATA_SLOTS;
+    entry->owner = FRAME_OWNED_BY_INTERPRETER;
+    return entry;
+}
+
 static inline _PyControlRecord *
 _PyThreadState_PushEntry(PyThreadState *tstate)
 {
     _PyThreadState_AdjustControlLimit(tstate, 1);
-    _PyControlRecord *entry = _PyThreadState_PushControl(tstate);
-    if (entry == NULL) {
-        _PyThreadState_AdjustControlLimit(tstate, -1);
+    _PyControlRecord *entry;
+    if (_PyThreadState_HasControlSpace(tstate, 1) &&
+        _PyThreadState_HasEntrySpace(tstate, 0)) {
+        entry = _PyThreadState_PushEntryUnchecked(tstate);
     }
     else {
+        entry = _PyThreadState_PushFrame(tstate, _PY_ENTRY_DATA_SLOTS);
+        if (entry == NULL) {
+            _PyThreadState_AdjustControlLimit(tstate, -1);
+            return NULL;
+        }
         entry->owner = FRAME_OWNED_BY_INTERPRETER;
     }
     return entry;
@@ -532,7 +571,7 @@ _PyThreadState_PushEntry(PyThreadState *tstate)
 static inline void
 _PyThreadState_PopEntry(PyThreadState *tstate, _PyControlRecord *entry)
 {
-    _PyThreadState_PopControl(tstate, entry);
+    _PyThreadState_PopFrame(tstate, entry, entry->data);
     _PyThreadState_AdjustControlLimit(tstate, -1);
     _Py_CONTROLSTACK_HOOK(tstate, "pop-entry");
 }
@@ -549,12 +588,6 @@ _PyThreadState_PushFrameUnchecked(PyThreadState *tstate, int nslots)
     return frame;
 }
 
-// Exported for external JIT support
-PyAPI_FUNC(_PyControlRecord *)
-_PyThreadState_PushFrame(PyThreadState *tstate, size_t size);
-
-PyAPI_FUNC(void) _PyThreadState_PopFrame(
-    PyThreadState *tstate, _PyControlRecord *frame, _PyInterpreterDataFrame *fp);
 PyAPI_FUNC(void) _PyThreadState_PopDataFrame(
     PyThreadState *tstate, _PyInterpreterDataFrame *fp);
 
