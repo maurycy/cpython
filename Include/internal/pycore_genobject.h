@@ -31,14 +31,16 @@ _PyGen_FinalizerIsNoop(PyObject *op)
         FRAME_STATE_FINISHED(((PyGenObject *)op)->gi_frame_state);
 }
 #ifdef Py_GIL_DISABLED
-PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state);
+PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, _Py_CODEUNIT *ip, int state);
 PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
 #else
 /* gi_iframe is a complete DETACHED record, so restoring is one struct copy.
    The stack pointer is kept in a register across the copy so pushing the
-   sent value does not reload it from the bytes just written. */
+   sent value does not reload it from the bytes just written. When ip is
+   not NULL it replaces the saved instruction pointer, so the slot is
+   written once with its final contents. */
 static inline void
-_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state)
+_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, _Py_CODEUNIT *ip, int state)
 {
     assert(gen->gi_iframe.state == CONTROL_DETACHED);
     assert(gen->gi_iframe.data == &gen->gi_data);
@@ -57,6 +59,9 @@ _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, 
     if (value != NULL) {
         *sp++ = *value;
         w2 = (uint64_t)(uintptr_t)sp;
+    }
+    if (ip != NULL) {
+        w1 = (uint64_t)(uintptr_t)ip;
     }
     memcpy((char *)frame + 0, &w0, 8);
     memcpy((char *)frame + 8, &w1, 8);
@@ -139,12 +144,11 @@ _PyGen_PushFrameUnchecked(PyThreadState *tstate, PyGenObject *gen, _PyStackRef v
     if (PyStackRef_IsNone(value)) {
         _Py_CODEUNIT *ip = _PyGen_SkipDiscardedResume(tstate, &gen->gi_iframe);
         if (ip != NULL) {
-            _PyGen_LinkFrame(gen, frame, NULL, CONTROL_ACTIVE);
-            frame->instr_ptr = ip;
+            _PyGen_LinkFrame(gen, frame, NULL, ip, CONTROL_ACTIVE);
             return frame;
         }
     }
-    _PyGen_LinkFrame(gen, frame, &value, CONTROL_ACTIVE);
+    _PyGen_LinkFrame(gen, frame, &value, NULL, CONTROL_ACTIVE);
     return frame;
 }
 
@@ -154,18 +158,21 @@ _PyGen_PushFrame(PyThreadState *tstate, PyGenObject *gen)
     assert(gen->gi_live_frame == &gen->gi_iframe);
     _PyControlRecord *frame = _PyThreadState_PushControl(tstate);
     if (frame != NULL) {
-        _PyGen_LinkFrame(gen, frame, NULL, CONTROL_RESERVED);
+        _PyGen_LinkFrame(gen, frame, NULL, NULL, CONTROL_RESERVED);
     }
     return frame;
 }
 
 /* Resuming a generator from C needs an interpreter entry record and the
    generator record. Reserve both with one bounds check; fall back to the
-   two separate pushes when the committed region must grow. On failure
-   nothing stays pushed and *entry is NULL. */
+   two separate pushes when the committed region must grow. The value to
+   push (or NULL) and the resume address (or NULL for the saved one) are
+   known before the slot is written, so it is written once. On failure
+   nothing stays pushed, *entry is NULL and *value is untouched. */
 static inline _PyControlRecord *
 _PyGen_PushEntryAndFrame(PyThreadState *tstate, PyGenObject *gen,
-                         _PyControlRecord **entry)
+                         _PyControlRecord **entry, _PyStackRef *value,
+                         _Py_CODEUNIT *ip)
 {
     assert(gen->gi_live_frame == &gen->gi_iframe);
     if (_PyThreadState_HasControlSpace(tstate, 2)) {
@@ -173,7 +180,7 @@ _PyGen_PushEntryAndFrame(PyThreadState *tstate, PyGenObject *gen,
         _PyControlRecord *e = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
         e->owner = FRAME_OWNED_BY_INTERPRETER;
         _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
-        _PyGen_LinkFrame(gen, frame, NULL, CONTROL_RESERVED);
+        _PyGen_LinkFrame(gen, frame, value, ip, CONTROL_RESERVED);
         *entry = e;
         return frame;
     }
@@ -182,12 +189,13 @@ _PyGen_PushEntryAndFrame(PyThreadState *tstate, PyGenObject *gen,
         *entry = NULL;
         return NULL;
     }
-    _PyControlRecord *frame = _PyGen_PushFrame(tstate, gen);
+    _PyControlRecord *frame = _PyThreadState_PushControl(tstate);
     if (frame == NULL) {
         _PyThreadState_PopEntry(tstate, e);
         *entry = NULL;
         return NULL;
     }
+    _PyGen_LinkFrame(gen, frame, value, ip, CONTROL_RESERVED);
     *entry = e;
     return frame;
 }

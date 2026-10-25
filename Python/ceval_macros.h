@@ -636,8 +636,7 @@ _PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value
         if (!gen_try_set_executing(inner)) {
             break;
         }
-        _PyGen_LinkFrame(gen, frame, NULL, CONTROL_RESERVED);
-        frame->instr_ptr = send;
+        _PyGen_LinkFrame(gen, frame, NULL, send, CONTROL_RESERVED);
         frame->return_offset = (uint16_t)(1 + INLINE_CACHE_ENTRIES_SEND + send->op.arg);
         inner->gi_exc_state.previous_item = tstate->exc_info;
         tstate->exc_info = &inner->gi_exc_state;
@@ -646,11 +645,10 @@ _PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value
     }
     int state = frame == first ? CONTROL_ACTIVE : CONTROL_RESERVED;
     if (skip != NULL) {
-        _PyGen_LinkFrame(gen, frame, NULL, state);
-        frame->instr_ptr = skip;
+        _PyGen_LinkFrame(gen, frame, NULL, skip, state);
     }
     else {
-        _PyGen_LinkFrame(gen, frame, &value, state);
+        _PyGen_LinkFrame(gen, frame, &value, NULL, state);
     }
     if (frame != first) {
         for (_PyControlRecord *r = first; r <= frame; r++) {

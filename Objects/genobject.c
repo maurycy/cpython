@@ -264,27 +264,31 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
     assert(FT_ATOMIC_LOAD_INT8_RELAXED(gen->gi_frame_state) == FRAME_EXECUTING);
 
     PyThreadState *tstate = _PyThreadState_GET();
+
+    /* Decide from the saved record what the live record must contain:
+       the resume address (skipping RESUME_CHECK and POP_TOP when the
+       generator would discard the value) and the value to push, if any.
+       The record is then written once, with its final contents. */
+    PyObject *arg_obj = arg ? arg : Py_None;
+    _Py_CODEUNIT *ip = NULL;
+    if (arg_obj == Py_None) {
+        ip = _PyGen_SkipDiscardedResume(tstate, &gen->gi_iframe);
+    }
+    _PyStackRef value = PyStackRef_NULL;
+    if (ip == NULL) {
+        value = PyStackRef_FromPyObjectNew(arg_obj);
+    }
     _PyControlRecord *entry;
-    _PyControlRecord *frame = _PyGen_PushEntryAndFrame(tstate, gen, &entry);
+    _PyControlRecord *frame = _PyGen_PushEntryAndFrame(
+        tstate, gen, &entry, ip == NULL ? &value : NULL, ip);
     if (frame == NULL) {
+        if (ip == NULL) {
+            PyStackRef_CLOSE(value);
+        }
         FT_ATOMIC_STORE_INT8_RELEASE(gen->gi_frame_state, FRAME_CLEARED);
         gen_clear_frame(gen);
         *presult = NULL;
         return PYGEN_ERROR;
-    }
-
-    /* Push arg onto the frame's value stack, unless the generator would
-       discard it at once. */
-    PyObject *arg_obj = arg ? arg : Py_None;
-    _Py_CODEUNIT *ip = NULL;
-    if (arg_obj == Py_None) {
-        ip = _PyGen_SkipDiscardedResume(tstate, frame);
-    }
-    if (ip != NULL) {
-        frame->instr_ptr = ip;
-    }
-    else {
-        _PyFrame_StackPush(frame, PyStackRef_FromPyObjectNew(arg_obj));
     }
 
     _PyErr_StackItem *prev_exc_info = tstate->exc_info;
@@ -1074,9 +1078,12 @@ gen_transfer_frame(PyGenObject *gen, _PyControlRecord *dest, _PyStackRef *value,
 }
 
 void
-_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state)
+_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, _Py_CODEUNIT *ip, int state)
 {
     gen_transfer_frame(gen, frame, value, state);
+    if (ip != NULL) {
+        frame->instr_ptr = ip;
+    }
 }
 
 void
