@@ -189,6 +189,41 @@ def run(n):
     for i in range(n):
         leaf().f_back
 """,
+    "frame_noescape": """
+import sys
+def leaf():
+    sys._getframe()
+    return 1
+def run(n):
+    for i in range(n):
+        leaf()
+""",
+    "return_depth10": """
+def leaf():
+    return 1
+def level(d):
+    if d:
+        return level(d - 1)
+    return leaf()
+def run(n):
+    for i in range(n):
+        level(10)
+""",
+    "exception_unwind20": """
+def raiser():
+    raise ValueError
+def level(d):
+    if d:
+        level(d - 1)
+    else:
+        raiser()
+def run(n):
+    for i in range(n):
+        try:
+            level(20)
+        except ValueError:
+            pass
+""",
     "gen_close_finally": """
 def gen():
     try:
