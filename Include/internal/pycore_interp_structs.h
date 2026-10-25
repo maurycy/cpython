@@ -871,6 +871,15 @@ struct _is {
            or the size specified by the THREAD_STACK_SIZE macro. */
         /* Used in Python/thread.c. */
         size_t stacksize;
+        /* Control stacks of finished threads kept mapped for reuse, so a
+           short-lived thread does not pay mmap, mprotect and munmap. */
+        PyMutex controlstack_cache_lock;
+        int controlstack_cache_count;
+        struct {
+            struct _PyControlRecord *base;
+            size_t size;
+            size_t committed;
+        } controlstack_cache[4];
     } threads;
 
     /* Reference to the _PyRuntime global variable. This field exists

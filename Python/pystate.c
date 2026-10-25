@@ -399,6 +399,8 @@ _PyRuntimeState_Fini(_PyRuntimeState *runtime)
     gilstate_clear();
 }
 
+static void free_controlstack_cache(PyInterpreterState *interp);
+
 #ifdef HAVE_FORK
 /* This function is called from PyOS_AfterFork_Child to ensure that
    newly created child processes do not share locks with the parent. */
@@ -426,6 +428,13 @@ _PyRuntimeState_ReInitThreads(_PyRuntimeState *runtime)
         }
     }
 #endif
+
+    for (PyInterpreterState *interp = runtime->interpreters.head;
+         interp != NULL; interp = interp->next)
+    {
+        _PyMutex_at_fork_reinit(&interp->threads.controlstack_cache_lock);
+        free_controlstack_cache(interp);
+    }
 
     _PyThread_AfterFork(&runtime->threads);
 
@@ -473,6 +482,7 @@ alloc_interpreter(void)
 static void
 free_interpreter(PyInterpreterState *interp)
 {
+    free_controlstack_cache(interp);
 #ifdef Py_STATS
     if (interp->pystats_struct) {
         PyMem_RawFree(interp->pystats_struct);
@@ -1509,12 +1519,87 @@ commit_control_stack(PyThreadState *tstate, size_t size)
     return 0;
 }
 
+/* Cached stacks hold at most this much committed memory each; a stack that
+   grew further is unmapped instead of trimmed. */
+#define CONTROLSTACK_CACHE_MAX_COMMITTED (1 << 20)
+
+static int
+take_cached_control_stack(PyThreadState *tstate)
+{
+    struct pythreads *threads = &tstate->interp->threads;
+    PyMutex_Lock(&threads->controlstack_cache_lock);
+    int n = threads->controlstack_cache_count;
+    if (n == 0) {
+        PyMutex_Unlock(&threads->controlstack_cache_lock);
+        return 0;
+    }
+    n--;
+    tstate->base_frame = threads->controlstack_cache[n].base;
+    tstate->controlstack_size = threads->controlstack_cache[n].size;
+    tstate->controlstack_end = tstate->base_frame +
+        threads->controlstack_cache[n].committed / sizeof(_PyControlRecord);
+    threads->controlstack_cache_count = n;
+    PyMutex_Unlock(&threads->controlstack_cache_lock);
+    return 1;
+}
+
+static int
+cache_control_stack(PyThreadState *tstate)
+{
+    size_t committed = (char *)tstate->controlstack_end - (char *)tstate->base_frame;
+    if (committed > CONTROLSTACK_CACHE_MAX_COMMITTED || tstate->interp == NULL) {
+        return 0;
+    }
+    struct pythreads *threads = &tstate->interp->threads;
+    PyMutex_Lock(&threads->controlstack_cache_lock);
+    int n = threads->controlstack_cache_count;
+    if (n == (int)Py_ARRAY_LENGTH(threads->controlstack_cache)) {
+        PyMutex_Unlock(&threads->controlstack_cache_lock);
+        return 0;
+    }
+#ifdef Py_DEBUG
+    memset(tstate->base_frame, 0xCB, committed);
+#endif
+    threads->controlstack_cache[n].base = tstate->base_frame;
+    threads->controlstack_cache[n].size = tstate->controlstack_size;
+    threads->controlstack_cache[n].committed = committed;
+    threads->controlstack_cache_count = n + 1;
+    PyMutex_Unlock(&threads->controlstack_cache_lock);
+    return 1;
+}
+
+static void
+release_control_stack(struct _PyControlRecord *base, size_t size)
+{
+#ifdef MS_WINDOWS
+    VirtualFree(base, 0, MEM_RELEASE);
+#elif defined(MAP_ANONYMOUS)
+    munmap(base, size);
+#else
+    PyMem_RawFree(base);
+#endif
+}
+
+static void
+free_controlstack_cache(PyInterpreterState *interp)
+{
+    struct pythreads *threads = &interp->threads;
+    for (int i = 0; i < threads->controlstack_cache_count; i++) {
+        release_control_stack(threads->controlstack_cache[i].base,
+                              threads->controlstack_cache[i].size);
+    }
+    threads->controlstack_cache_count = 0;
+}
+
 static int
 allocate_control_stack(PyThreadState *tstate)
 {
 #ifndef _PY_CONTROLSTACK_RESERVE_SHIFT
 #define _PY_CONTROLSTACK_RESERVE_SHIFT 26
 #endif
+    if (take_cached_control_stack(tstate)) {
+        return 0;
+    }
     size_t size = SIZEOF_VOID_P > 4 ? (size_t)1 << _PY_CONTROLSTACK_RESERVE_SHIFT : (size_t)1 << 24;
     void *base;
 #ifdef MS_WINDOWS
@@ -1542,13 +1627,10 @@ free_control_stack(PyThreadState *tstate)
     if (tstate->base_frame == NULL) {
         return;
     }
-#ifdef MS_WINDOWS
-    VirtualFree(tstate->base_frame, 0, MEM_RELEASE);
-#elif defined(MAP_ANONYMOUS)
-    munmap(tstate->base_frame, tstate->controlstack_size);
-#else
-    PyMem_RawFree(tstate->base_frame);
-#endif
+    if (!cache_control_stack(tstate)) {
+        release_control_stack(tstate->base_frame, tstate->controlstack_size);
+    }
+    tstate->base_frame = NULL;
 }
 
 static void
