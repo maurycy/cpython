@@ -284,6 +284,91 @@ def run(n):
         next(g)
         g.close()
 """,
+    "frame_return_drop": """
+import sys
+def leaf():
+    return sys._getframe()
+def run(n):
+    for i in range(n):
+        leaf()
+""",
+    "frame_return_fback": """
+import sys
+def leaf():
+    return sys._getframe()
+def run(n):
+    for i in range(n):
+        leaf().f_back
+""",
+    "gen_finish_next": """
+def gen():
+    try:
+        yield 1
+    finally:
+        pass
+def run(n):
+    s = object()
+    for i in range(n):
+        g = gen()
+        next(g)
+        next(g, s)
+""",
+    "gen_finish_close": """
+def gen():
+    try:
+        yield 1
+    finally:
+        pass
+def run(n):
+    for i in range(n):
+        g = gen()
+        next(g)
+        g.close()
+""",
+    "gen_finish_next_frame_held": """
+def gen():
+    try:
+        yield 1
+    finally:
+        pass
+def run(n):
+    s = object()
+    for i in range(n):
+        g = gen()
+        next(g)
+        f = g.gi_frame
+        next(g, s)
+        del f
+""",
+    "gen_finish_close_frame_held": """
+def gen():
+    try:
+        yield 1
+    finally:
+        pass
+def run(n):
+    for i in range(n):
+        g = gen()
+        next(g)
+        f = g.gi_frame
+        g.close()
+        del f
+""",
+    "gen_finish_next_frame_released": """
+def gen():
+    try:
+        yield 1
+    finally:
+        pass
+def run(n):
+    s = object()
+    for i in range(n):
+        g = gen()
+        next(g)
+        f = g.gi_frame
+        del f
+        next(g, s)
+""",
 }
 
 HARNESS = """
