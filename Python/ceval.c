@@ -2337,15 +2337,38 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
             tstate, PyStackRef_FromPyObjectNew(func), PyStackRef_NULL,
             refs, (int)argcount);
     }
-    _PyControlRecord *entry = _PyThreadState_PushEntry(tstate);
+    int exact = kwnames == NULL && argcount == (size_t)code->co_argcount &&
+        code->co_kwonlyargcount == 0 &&
+        (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0;
+    _PyControlRecord *entry;
+    if (exact && _PyThreadState_HasStackSpace(tstate, code->co_framesize)) {
+        /* Room for the entry record, the frame record and its data: reserve
+           all three with the one bounds check just made. Nothing runs
+           between the pushes and the eval loop. */
+        CALL_STAT_INC(frames_pushed);
+        _PyThreadState_AdjustControlLimit(tstate, 1);
+        entry = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
+        entry->owner = FRAME_OWNED_BY_INTERPRETER;
+        _PyControlRecord *frame = _PyThreadState_PushFrameUnchecked(
+            tstate, (int)code->co_framesize);
+        _PyInterpreterDataFrame *fp = frame->data;
+        Py_XINCREF(locals);
+        _PyFrame_Initialize(tstate, frame, fp, PyStackRef_FromPyObjectNew(func),
+                            locals, code, (int)argcount);
+        for (size_t i = 0; i < argcount; i++) {
+            fp->localsplus[i] = PyStackRef_FromPyObjectNew(args[i]);
+        }
+        EVAL_CALL_STAT_INC(EVAL_CALL_VECTOR);
+        PyObject *result = _PyEval_EvalFrame(tstate, frame, 0);
+        _PyThreadState_PopEntry(tstate, entry);
+        return result;
+    }
+    entry = _PyThreadState_PushEntry(tstate);
     if (entry == NULL) {
         return NULL;
     }
-    if (kwnames == NULL && argcount == (size_t)code->co_argcount &&
-        code->co_kwonlyargcount == 0 &&
-        (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0)
-    {
-        /* Exact positional call: bind straight into the frame. */
+    if (exact) {
+        /* Exact positional call at a commit or chunk boundary. */
         CALL_STAT_INC(frames_pushed);
         _PyControlRecord *frame = _PyThreadState_PushFrame(tstate, code->co_framesize);
         if (frame == NULL) {

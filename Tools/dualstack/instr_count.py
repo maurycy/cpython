@@ -224,6 +224,54 @@ def run(n):
         except ValueError:
             pass
 """,
+    "asyncio_short_tasks": """
+import asyncio
+loop = asyncio.new_event_loop()
+async def leaf():
+    return 1
+async def main(n):
+    await asyncio.gather(*[leaf() for _ in range(n)])
+def run(n):
+    loop.run_until_complete(main(n))
+""",
+    "asyncio_short_tasks_sleep0": """
+import asyncio
+loop = asyncio.new_event_loop()
+async def leaf():
+    await asyncio.sleep(0)
+    return 1
+async def main(n):
+    await asyncio.gather(*[leaf() for _ in range(n)])
+def run(n):
+    loop.run_until_complete(main(n))
+""",
+    "asyncio_tree_gather": """
+import asyncio
+loop = asyncio.new_event_loop()
+async def node(depth):
+    if depth == 0:
+        return 1
+    return sum(await asyncio.gather(*[node(depth - 1) for _ in range(3)]))
+async def main(n):
+    for _ in range(max(1, n // 40)):
+        await node(3)
+def run(n):
+    loop.run_until_complete(main(n))
+""",
+    "asyncio_callbacks": """
+import asyncio
+loop = asyncio.new_event_loop()
+def cb(fut, i, n):
+    if i == n - 1:
+        fut.set_result(None)
+async def main(n):
+    fut = loop.create_future()
+    for i in range(n):
+        loop.call_soon(cb, fut, i, n)
+    await fut
+def run(n):
+    loop.run_until_complete(main(n))
+""",
     "gen_close_finally": """
 def gen():
     try:
