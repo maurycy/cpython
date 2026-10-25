@@ -10,6 +10,8 @@ extern "C" {
 
 #include "pycore_frame.h"         // FRAME_STATE_FINISHED()
 #include "pycore_interpframe.h"
+#include "pycore_tstate.h"        // _PyThreadStateImpl
+#include "opcode_ids.h"           // RESUME_CHECK
 
 #include <stddef.h>               // offsetof()
 
@@ -72,12 +74,46 @@ _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 }
 #endif
 
+/* A suspended generator whose next instructions are RESUME_CHECK and
+   POP_TOP discards the value it is resumed with. When the eval breaker
+   would let RESUME_CHECK pass, both instructions can be skipped and the
+   value need not be pushed. Returns the instruction to resume at, or NULL
+   to take the ordinary path. */
+static inline _Py_CODEUNIT *
+_PyGen_SkipDiscardedResume(PyThreadState *tstate, _PyControlRecord *saved)
+{
+    _Py_CODEUNIT *ip = saved->instr_ptr;
+    if (ip[0].op.code != RESUME_CHECK || ip[2].op.code != POP_TOP) {
+        return NULL;
+    }
+    uintptr_t eval_breaker = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker);
+    uintptr_t version = FT_ATOMIC_LOAD_UINTPTR_ACQUIRE(
+        _PyFrame_GetCode(saved)->_co_instrumentation_version);
+    if (eval_breaker != version) {
+        return NULL;
+    }
+#ifdef Py_GIL_DISABLED
+    if (saved->tlbc_index != ((_PyThreadStateImpl *)tstate)->tlbc_index) {
+        return NULL;
+    }
+#endif
+    return ip + 3;
+}
+
 static inline _PyControlRecord *
 _PyGen_PushFrameUnchecked(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value)
 {
     assert(gen->gi_live_frame == &gen->gi_iframe);
     // Inlined resume: published ACTIVE, nothing runs before _PUSH_FRAME.
     _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
+    if (PyStackRef_IsNone(value)) {
+        _Py_CODEUNIT *ip = _PyGen_SkipDiscardedResume(tstate, &gen->gi_iframe);
+        if (ip != NULL) {
+            _PyGen_LinkFrame(gen, frame, NULL, CONTROL_ACTIVE);
+            frame->instr_ptr = ip;
+            return frame;
+        }
+    }
     _PyGen_LinkFrame(gen, frame, &value, CONTROL_ACTIVE);
     return frame;
 }

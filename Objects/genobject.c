@@ -273,9 +273,19 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
         return PYGEN_ERROR;
     }
 
-    /* Push arg onto the frame's value stack */
+    /* Push arg onto the frame's value stack, unless the generator would
+       discard it at once. */
     PyObject *arg_obj = arg ? arg : Py_None;
-    _PyFrame_StackPush(frame, PyStackRef_FromPyObjectNew(arg_obj));
+    _Py_CODEUNIT *ip = NULL;
+    if (arg_obj == Py_None) {
+        ip = _PyGen_SkipDiscardedResume(tstate, frame);
+    }
+    if (ip != NULL) {
+        frame->instr_ptr = ip;
+    }
+    else {
+        _PyFrame_StackPush(frame, PyStackRef_FromPyObjectNew(arg_obj));
+    }
 
     _PyErr_StackItem *prev_exc_info = tstate->exc_info;
     gen->gi_exc_state.previous_item = prev_exc_info;
