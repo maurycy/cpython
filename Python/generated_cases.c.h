@@ -2042,11 +2042,26 @@
                 assert(_PyFrame_GetBytecode(shim)[0].op.code == EXIT_INIT_CHECK);
                 assert(_PyFrame_GetBytecode(shim)[1].op.code == RETURN_VALUE);
                 shim->localsplus[0] = PyStackRef_DUP(self);
-                assert(stack_pointer == _PyFrame_GetStackPointer(frame));
-                _PyFrame_StackPointerValidate(frame);
-                _PyInterpreterFrame *temp = _PyEvalFramePushAndInit(
-                    tstate, init, NULL, args-1, oparg+1, NULL, shim);
-                _PyFrame_StackPointerInvalidate(frame);
+                PyCodeObject *init_code = (PyCodeObject *)((PyFunctionObject *)PyStackRef_AsPyObjectBorrow(init))->func_code;
+                _PyInterpreterFrame *temp;
+                if (init_code->co_argcount == oparg + 1 &&
+                    init_code->co_kwonlyargcount == 0 &&
+                    (init_code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0)
+                {
+                    temp = _PyFrame_PushUnchecked(tstate, init, oparg + 1, shim);
+                    _PyStackRef *locals = temp->localsplus;
+                    locals[0] = self;
+                    for (int i = 0; i < oparg; i++) {
+                        locals[1 + i] = args[i];
+                    }
+                }
+                else {
+                    assert(stack_pointer == _PyFrame_GetStackPointer(frame));
+                    _PyFrame_StackPointerValidate(frame);
+                    temp = _PyEvalFramePushAndInit(
+                        tstate, init, NULL, args-1, oparg+1, NULL, shim);
+                    _PyFrame_StackPointerInvalidate(frame);
+                }
                 stack_pointer += -2 - oparg;
                 ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                 if (temp == NULL) {

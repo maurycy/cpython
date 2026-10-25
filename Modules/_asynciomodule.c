@@ -3081,7 +3081,14 @@ task_step_impl(asyncio_state *state, TaskObj *task, PyObject *exc)
 
     int gen_status = PYGEN_ERROR;
     if (exc == NULL) {
-        gen_status = PyIter_Send(coro, Py_None, &result);
+        if (PyCoro_CheckExact(coro) || PyGen_CheckExact(coro)) {
+            PySendResultPair pair = _PyGen_SendNone(coro);
+            result = pair.object;
+            gen_status = pair.kind;
+        }
+        else {
+            gen_status = PyIter_Send(coro, Py_None, &result);
+        }
     }
     else {
         result = PyObject_CallMethodOneArg(coro, &_Py_ID(throw), exc);

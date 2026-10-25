@@ -4778,8 +4778,26 @@ dummy_func(
             assert(_PyFrame_GetBytecode(shim)[1].op.code == RETURN_VALUE);
             /* Push self onto stack of shim */
             shim->localsplus[0] = PyStackRef_DUP(self);
-            _PyInterpreterFrame *temp = _PyEvalFramePushAndInit(
-                tstate, init, NULL, args-1, oparg+1, NULL, shim);
+            PyCodeObject *init_code = (PyCodeObject *)((PyFunctionObject *)PyStackRef_AsPyObjectBorrow(init))->func_code;
+            _PyInterpreterFrame *temp;
+            if (init_code->co_argcount == oparg + 1 &&
+                init_code->co_kwonlyargcount == 0 &&
+                (init_code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0)
+            {
+                /* Exact positional __init__: bind self and the arguments
+                   straight into the frame. Stack space for both frames was
+                   checked by _CHECK_AND_ALLOCATE_OBJECT. */
+                temp = _PyFrame_PushUnchecked(tstate, init, oparg + 1, shim);
+                _PyStackRef *locals = temp->localsplus;
+                locals[0] = self;
+                for (int i = 0; i < oparg; i++) {
+                    locals[1 + i] = args[i];
+                }
+            }
+            else {
+                temp = _PyEvalFramePushAndInit(
+                    tstate, init, NULL, args-1, oparg+1, NULL, shim);
+            }
             DEAD(init);
             DEAD(self);
             DEAD(args);
