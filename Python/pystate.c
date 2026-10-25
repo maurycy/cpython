@@ -1519,8 +1519,8 @@ commit_control_stack(PyThreadState *tstate, size_t size)
     return 0;
 }
 
-/* Cached stacks hold at most this much committed memory each; a stack that
-   grew further is unmapped instead of trimmed. */
+/* Keep committed pages so reuse does not need to commit them again. Release
+   stacks above this cap rather than retaining an unusually deep allocation. */
 #define CONTROLSTACK_CACHE_MAX_COMMITTED (1 << 20)
 
 static int
@@ -3398,8 +3398,8 @@ pop_data_stack(PyThreadState *tstate, _PyStackRef *slots)
         tstate->datastack_top = &previous->data[previous->top];
         tstate->datastack_chunk = previous;
         tstate->datastack_limit = (PyObject **)(((char *)previous) + previous->size);
-        // Keep a few freed chunks (linked through ->previous) so repeated
-        // deep descents do not map and unmap memory each time.
+        // Reuse previous to link freed chunks. Keeping a bounded cache avoids
+        // mapping and unmapping them on each repeated deep descent.
         chunk->previous = tstate->datastack_cached_chunk;
         tstate->datastack_cached_chunk = chunk;
         int kept = 1;
@@ -3493,7 +3493,8 @@ _PyThreadState_PopDataFrame(PyThreadState *tstate, _PyInterpreterDataFrame *fp)
  *  R1 no CONTROL_BASE above slot 0; DETACHED only for a dying generator
  *  R2 owner is THREAD / GENERATOR / INTERPRETER / FRAME_OBJECT
  *  T1 thread-owned data lies in a data stack chunk
- *  T2 the topmost thread-owned data lies in the current chunk below datastack_top
+ *  T2 topmost thread-owned data is below datastack_top, in the current chunk
+ *     or its predecessor (the data can outlive a popped control record)
  *  G1 gen->gi_live_frame == record, gi_iframe stays DETACHED, gi_iframe.data == &gi_data
  *  G2 gi_frame_state is EXECUTING while linked (CLEARED when DETACHED)
  *  E1 ACTIVE entry records point their data into this thread's C stack
@@ -3709,6 +3710,7 @@ _PyThreadState_CheckControlStack(PyThreadState *tstate, int flags,
 void
 _PyThreadState_ControlStackHook(PyThreadState *tstate, const char *where)
 {
+    // Read the debug-only setting once, rather than on every push and pop.
     static int mode = -1;
     if (mode < 0) {
         const char *env = getenv("PYTHON_CONTROLSTACK_CHECK");

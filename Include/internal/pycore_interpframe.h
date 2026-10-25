@@ -375,23 +375,18 @@ _PyFrame_GetFrameObject(_PyControlRecord *frame, _PyInterpreterDataFrame *fp)
 PyAPI_FUNC(void)
 _PyFrame_ClearLocals(_PyControlRecord *frame, _PyInterpreterDataFrame *fp);
 
-/* Clears all references in the frame.
- * If take is non-zero, then the _PyControlRecord frame
- * may be transferred to the frame object it references
- * instead of being cleared. Either way
- * the caller no longer owns the references
- * in the frame.
- * take should  be set to 1 for heap allocated
- * frames like the ones in generators and coroutines.
+/* Clear the frame's references except f_executable. If a frame object
+ * outlives the frame, transfer the references to it instead. The frame
+ * must no longer be current: dropping references can run Python code.
  *
  * Exported for external JIT support
  */
  PyAPI_FUNC(void)
 _PyFrame_ClearExceptCode(_PyControlRecord *frame, _PyInterpreterDataFrame *fp);
 
-/* Copy a dying frame into the frame object that outlives it. Runs no Python
-   code; the record must still be on the control stack (f_back needs the
-   caller). */
+/* Transfer a dying frame to the frame object that outlives it. Runs no
+   Python code. A thread-owned record must still be on the control stack
+   so f_back can find its caller; a generator's saved record is detached. */
 PyAPI_FUNC(void)
 _PyFrame_TakeOwnership(PyFrameObject *f, _PyControlRecord *frame,
                        _PyInterpreterDataFrame *fp);
@@ -418,8 +413,8 @@ _PyThreadState_HasStackSpace(PyThreadState *tstate, int size)
     if (tstate->datastack_top == NULL) {
         return false;
     }
-    /* Evaluate both bounds without short-circuiting so the compiler can
-       fold them into one conditional compare instead of two branches. */
+    /* Both checks are side-effect free. Evaluate them together to allow
+       a conditional compare on targets that support it. */
     bool control = _PyThreadState_HasControlSpace(tstate, 2);
     bool data = size < tstate->datastack_limit - tstate->datastack_top;
     return control & data;
@@ -469,9 +464,9 @@ PyAPI_FUNC(void) _PyThreadState_ControlStackHook(PyThreadState *tstate, const ch
 #  define _Py_CONTROLSTACK_HOOK(tstate, where) ((void)0)
 #endif
 
-/* Takes the next control slot without writing anything into it. The caller
-   must fill the record, including its state, before any code that could
-   walk the stack runs. */
+/* Reserve a slot without initializing it. The caller must fill the record,
+   including its state, before calling code that can inspect the stack or
+   re-enter Python. */
 static inline _PyControlRecord *
 _PyThreadState_ReserveControlUnchecked(PyThreadState *tstate)
 {
@@ -488,8 +483,8 @@ _PyThreadState_PushControlUnchecked(PyThreadState *tstate, int state)
     return frame;
 }
 
-/* Reserved-state push for paths that activate the record later
-   (interpreter entries, trampolines, frames evaluated from C). */
+/* Leave the record RESERVED until the caller has initialized it and is
+   ready to enter the frame. Used by entries, trampolines and slow pushes. */
 static inline _PyControlRecord *
 _PyThreadState_PushControl(PyThreadState *tstate)
 {
@@ -503,6 +498,7 @@ static inline void
 _PyThreadState_PopControl(PyThreadState *tstate, _PyControlRecord *frame)
 {
     assert(frame + 1 == tstate->controlstack_top);
+    // The data frame can outlive this slot while its references are cleared.
     tstate->controlstack_top = frame;
 #ifdef Py_DEBUG
     frame->f_executable = PyStackRef_NULL;
@@ -537,8 +533,8 @@ _PyThreadState_PopEntry(PyThreadState *tstate, _PyControlRecord *entry)
     _Py_CONTROLSTACK_HOOK(tstate, "pop-entry");
 }
 
-/* Inlined Python-to-Python calls: nothing can run between this push and
-   _PUSH_FRAME, so the record is published ACTIVE right away. */
+/* Fast call paths initialize the record before entering the callee, with
+   no intervening Python callbacks. Set ACTIVE here to avoid a second store. */
 static inline _PyControlRecord *
 _PyThreadState_PushFrameUnchecked(PyThreadState *tstate, int nslots)
 {

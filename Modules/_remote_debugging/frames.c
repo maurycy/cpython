@@ -312,11 +312,11 @@ process_frame_chain(
     ctx->stopped_at_cached_frame = 0;
     ctx->last_frame_visited = 0;
 
-    /* Control-stack layout: records have no previous pointer (the debug
-       offset is 0); they form a contiguous array from the base record up
-       to the current one. Read that range in one go and walk it downward.
-       DUALSTACK_READER_INDIVIDUAL=1 reads each record separately instead,
-       for measuring what the single read is worth. */
+    /* This prototype uses a zero previous offset to identify control records.
+       Read the array from base through current in one call, then walk it
+       downward. Code objects still need separate reads; this is not an atomic
+       snapshot of the target. Setting DUALSTACK_READER_INDIVIDUAL to any value
+       selects per-record reads for the measurement ablation. */
     int control_stack = unwinder->debug_offsets.interpreter_frame.previous == 0;
     size_t record_size = (size_t)unwinder->debug_offsets.interpreter_frame.size;
     char *records = NULL;

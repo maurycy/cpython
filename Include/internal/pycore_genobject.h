@@ -35,21 +35,19 @@ _PyGen_FinalizerIsNoop(PyObject *op)
 PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, _Py_CODEUNIT *ip, int state);
 PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
 #else
-/* gi_iframe is a complete DETACHED record, so restoring is one struct copy.
-   The stack pointer is kept in a register across the copy so pushing the
-   sent value does not reload it from the bytes just written. When ip is
-   not NULL it replaces the saved instruction pointer, so the slot is
-   written once with its final contents. */
+/* Restore the saved record, optionally replacing its instruction pointer
+   and pushing a value. Keep this helper inlined on the resume paths. */
 static inline Py_ALWAYS_INLINE void
 _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, _Py_CODEUNIT *ip, int state)
 {
     assert(gen->gi_iframe.state == CONTROL_DETACHED);
     assert(gen->gi_iframe.data == &gen->gi_data);
     assert(gen->gi_iframe.owner == FRAME_OWNED_BY_GENERATOR);
-    /* Read the whole saved record into registers before the first store
-       to the slot: when the two share the low 12 bits of their addresses,
-       a load issued after a store to the other one waits for that store
-       to retire (4K aliasing). Five scalar words keep gcc from spilling. */
+    /* Load all five words before writing the live record. Interleaving
+       these accesses can stall when the addresses alias in the store buffer.
+       The explicit words avoided spills from an aggregate copy in the
+       measured GCC PGO build. Words 1 and 2 hold the instruction and stack
+       pointers; update them before storing the record to avoid a reload. */
     uint64_t w0, w1, w2, w3, w4;
     memcpy(&w0, (const char *)&gen->gi_iframe + 0, 8);
     memcpy(&w1, (const char *)&gen->gi_iframe + 8, 8);
@@ -77,9 +75,9 @@ _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, 
     gen->gi_live_frame = frame;
 }
 
-/* Saving the live record: read every field from the slot before the
-   first store into the generator, for the same aliasing reason as in
-   _PyGen_LinkFrame. */
+/* Save the fields that change while the generator runs. Read them before
+   writing gi_iframe, for the same aliasing reason as in _PyGen_LinkFrame.
+   The saved record keeps its executable, data, owner and DETACHED state. */
 static inline void
 _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 {
@@ -105,7 +103,8 @@ _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 }
 #endif
 
-/* Would RESUME_CHECK pass for this suspended generator right now? */
+/* Skipping RESUME_CHECK must still respect pending work, instrumentation
+   changes and, in free-threaded builds, the thread-local bytecode index. */
 static inline int
 _PyGen_ResumeCheckPasses(PyThreadState *tstate, _PyControlRecord *saved)
 {
@@ -120,11 +119,10 @@ _PyGen_ResumeCheckPasses(PyThreadState *tstate, _PyControlRecord *saved)
     return eval_breaker == version;
 }
 
-/* A suspended generator whose next instructions are RESUME_CHECK and
-   POP_TOP discards the value it is resumed with. When RESUME_CHECK would
-   pass, both instructions can be skipped and the value need not be
-   pushed. Returns the instruction to resume at, or NULL to take the
-   ordinary path. */
+/* Return the instruction after RESUME_CHECK and POP_TOP if the check would
+   pass, or NULL for the normal resume path. Callers use this when sending
+   None, so the discarded value need not be pushed. ip[1] is the inline
+   cache entry for RESUME_CHECK. */
 static inline _Py_CODEUNIT *
 _PyGen_SkipDiscardedResume(PyThreadState *tstate, _PyControlRecord *saved)
 {
@@ -140,7 +138,7 @@ static inline _PyControlRecord *
 _PyGen_PushFrameUnchecked(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value)
 {
     assert(gen->gi_live_frame == &gen->gi_iframe);
-    // Inlined resume: published ACTIVE, nothing runs before _PUSH_FRAME.
+    // No Python callback can run before _PUSH_FRAME installs this record.
     _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
     _Py_CODEUNIT *ip = NULL;
     if (PyStackRef_IsNone(value)) {
@@ -161,12 +159,11 @@ _PyGen_PushFrame(PyThreadState *tstate, PyGenObject *gen)
     return frame;
 }
 
-/* Resuming a generator from C needs an interpreter entry record and the
-   generator record. Reserve both with one bounds check; fall back to the
-   two separate pushes when the committed region must grow. The value to
-   push (or NULL) and the resume address (or NULL for the saved one) are
-   known before the slot is written, so it is written once. On failure
-   nothing stays pushed, *entry is NULL and *value is untouched. */
+/* Reserve the C entry and generator records with one bounds check. Use
+   checked pushes when space is unavailable, unwinding the entry on failure.
+   A NULL value means no push; a NULL ip keeps the saved resume address.
+   On success, the record takes *value if supplied. On failure, *entry is
+   NULL, neither record remains pushed, and the caller still owns *value. */
 static inline _PyControlRecord *
 _PyGen_PushEntryAndFrame(PyThreadState *tstate, PyGenObject *gen,
                          _PyControlRecord **entry, _PyStackRef *value,
@@ -209,12 +206,13 @@ _PyGen_PopFrame(PyThreadState *tstate, PyGenObject *gen, _PyControlRecord *frame
 }
 
 #ifndef Py_GIL_DISABLED
-/* Pop and clear the record of a generator that has just finished and has
-   no frame object. Nothing will resume it, so the saved record keeps only
-   what inspection needs (code, data, owner, DETACHED state, an in-range
-   stack pointer); the live stack pointer is read once, before the pop, and
-   used directly to clear the locals instead of being saved and reloaded.
-   Finalizers run by the clears see the record already popped. */
+/* Detach a finished generator without saving a continuation, then clear its
+   references. The caller has marked it CLEARED and restored the exception
+   chain. No frame object may refer to the live record.
+
+   Keep gi_iframe DETACHED with an empty stack, and clear the locals using
+   the live stack pointer captured before the pop. Finalizers can re-enter
+   Python, so gi_live_frame must stop pointing to the slot before cleanup. */
 static inline void
 _PyGen_PopFrameFinished(PyThreadState *tstate, PyGenObject *gen,
                         _PyControlRecord *frame, _PyInterpreterDataFrame *fp)

@@ -871,8 +871,8 @@ struct _is {
            or the size specified by the THREAD_STACK_SIZE macro. */
         /* Used in Python/thread.c. */
         size_t stacksize;
-        /* Control stacks of finished threads kept mapped for reuse, so a
-           short-lived thread does not pay mmap, mprotect and munmap. */
+        /* Keep released control stacks mapped and committed so subsequent
+           threads can reuse them without allocating and committing again. */
         PyMutex controlstack_cache_lock;
         int controlstack_cache_count;
         struct {

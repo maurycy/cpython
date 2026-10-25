@@ -253,11 +253,8 @@ gen_raise_already_executing_error(PyGenObject *gen)
     PyErr_SetString(PyExc_ValueError, msg);
 }
 
-// Send 'arg' into 'gen'. On success, return PYGEN_NEXT or PYGEN_RETURN.
-// Returns PYGEN_ERROR on failure. 'presult' is set to the yielded or
-// returned value.
-// The generator must be in the FRAME_EXECUTING state when this function
-// is called.
+// Send 'arg' into an executing generator. Return the yielded or returned
+// value with PYGEN_NEXT or PYGEN_RETURN, or NULL with PYGEN_ERROR.
 static PySendResultPair
 gen_send_ex2_pair(PyGenObject *gen, PyObject *arg, int exc)
 {
@@ -265,10 +262,9 @@ gen_send_ex2_pair(PyGenObject *gen, PyObject *arg, int exc)
 
     PyThreadState *tstate = _PyThreadState_GET();
 
-    /* Decide from the saved record what the live record must contain:
-       the resume address (skipping RESUME_CHECK and POP_TOP when the
-       generator would discard the value) and the value to push, if any.
-       The record is then written once, with its final contents. */
+    /* Choose the resume address and sent value before copying the record.
+       This avoids storing the saved IP/SP only to reload and replace them
+       in the live slot. */
     PyObject *arg_obj = arg ? arg : Py_None;
     _Py_CODEUNIT *ip = NULL;
     if (arg_obj == Py_None) {
@@ -354,8 +350,8 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
     return pair.kind;
 }
 
-// Set the generator 'gen' to the executing state and send 'arg' into it.
-// See gen_send_ex2() for details.
+// Set 'gen' to the executing state and send 'arg' into it.
+// See gen_send_ex2_pair() for the result convention.
 static PySendResultPair
 gen_send_pair(PyGenObject *gen, PyObject *arg)
 {
@@ -410,9 +406,8 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
     return pair.kind;
 }
 
-/* Resume an exact generator or coroutine with None. The result travels
-   in registers instead of through an out-parameter on the caller's
-   C stack. */
+/* Resume an exact generator or coroutine with None. Return the status and
+   value together so the caller does not need an output parameter. */
 PySendResultPair
 _PyGen_SendNone(PyObject *self)
 {

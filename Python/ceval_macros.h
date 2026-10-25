@@ -588,14 +588,12 @@ gen_try_set_executing(PyGenObject *gen)
     return false;
 }
 
-/* Resume `gen` with `value`, following transparent delegation. A generator
-   suspended inside a yield-from or await loop would run RESUME_CHECK,
-   JUMP_BACKWARD_NO_INTERRUPT and SEND_GEN only to push the frame of the
-   generator it delegates to. When the eval breaker would let RESUME_CHECK
-   pass and SEND_GEN would specialise, link that level's record directly and
-   continue with the delegate, so one dispatch reaches the innermost frame.
-   Each level still gets its own control record. Returns the innermost
-   record, which is the one to run. */
+/* Resume gen with value, following yield-from/await delegation when the
+   bytecode and resume checks allow it. This skips dispatch through
+   RESUME_CHECK, JUMP_BACKWARD_NO_INTERRUPT and SEND_GEN for outer levels.
+   Each level still gets its own record and exception-state link. Return
+   the innermost record for the interpreter to run; a failed guard leaves
+   that level on the normal resume path. */
 static inline _PyControlRecord *
 _PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value)
 {
@@ -651,6 +649,7 @@ _PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value
         _PyGen_LinkFrame(gen, frame, &value, NULL, state);
     }
     if (frame != first) {
+        // Keep intermediate records RESERVED until the whole chain is built.
         for (_PyControlRecord *r = first; r <= frame; r++) {
             r->state = CONTROL_ACTIVE;
         }

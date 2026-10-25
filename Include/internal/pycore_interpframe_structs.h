@@ -51,9 +51,9 @@ struct _PyControlRecord {
     /* Index of thread-local bytecode containing instr_ptr. */
     int32_t tlbc_index;
 #endif
-    uint16_t return_offset;  /* Only relevant during a function call */
+    uint16_t return_offset;  /* Applied when a callee returns to this frame */
     char owner;
-    uint8_t state; /* enum _controlstate; a whole byte so readers can use offsetof() */
+    uint8_t state; /* enum _controlstate; addressable by external readers */
     uint8_t visited:1;
 #ifdef Py_DEBUG
     uint8_t stackpointer_valid:1;

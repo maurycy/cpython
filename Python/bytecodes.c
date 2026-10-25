@@ -4635,11 +4635,10 @@ dummy_func(
             _SAVE_RETURN_OFFSET +
             _PUSH_FRAME;
 
-        /* Calling a generator function creates the generator and returns
-           it at once. Instead of pushing a frame whose first instruction
-           is RETURN_GENERATOR and copying it into the generator, build the
-           saved record and data frame in place. Codes that start with
-           MAKE_CELL or COPY_FREE_VARS are not specialised this way. */
+        /* Build the saved record and data directly in the generator, avoiding
+           a temporary frame and RETURN_GENERATOR. Specialization excludes code
+           starting with MAKE_CELL or COPY_FREE_VARS. The call macro checks the
+           eval-frame hook before taking this path. */
         op(_INIT_CALL_PY_GEN_EXACT_ARGS, (callable, self_or_null, args[oparg] -- res)) {
             PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(callable);
             PyCodeObject *code = (PyCodeObject *)func->func_code;
@@ -4796,9 +4795,8 @@ dummy_func(
                 init_code->co_kwonlyargcount == 0 &&
                 (init_code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0)
             {
-                /* Exact positional __init__: bind self and the arguments
-                   straight into the frame. Stack space for both frames was
-                   checked by _CHECK_AND_ALLOCATE_OBJECT. */
+                /* Bind self and the exact positional arguments directly.
+                   _ALLOCATE_OBJECT checked space for this frame and the shim. */
                 temp = _PyFrame_PushUnchecked(tstate, init, oparg + 1);
                 _PyStackRef *locals = temp->data->localsplus;
                 locals[0] = self;
@@ -4807,8 +4805,8 @@ dummy_func(
                 }
             }
             else {
-                /* Positional binding cannot run Python, so the shim record
-                   needs no recursion-limit adjustment around it. */
+                /* Binding positional arguments cannot call Python, so the
+                   shim needs no recursion-limit adjustment during binding. */
                 temp = _PyEvalFramePushAndInit(
                     tstate, init, NULL, args-1, oparg+1, NULL);
             }
@@ -4844,10 +4842,9 @@ dummy_func(
             DEAD(should_be_none);
         }
 
-        /* The __init__ cleanup shim is EXIT_INIT_CHECK followed by
-           RETURN_VALUE of self. Fuse the two so the shim returns in one
-           dispatch; the RETURN_VALUE in the shim's code is kept for the
-           error path and for anything that inspects the code object. */
+        /* Return self in the same dispatch after checking __init__'s result.
+           Keep the following RETURN_VALUE in the shim's bytecode for code
+           that inspects the instruction sequence. */
         macro(EXIT_INIT_CHECK) =
             _EXIT_INIT_CHECK +
             _MAKE_HEAP_SAFE +

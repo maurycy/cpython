@@ -1290,11 +1290,9 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
 #endif
     _PyControlRecord *entry = frame - 1;
 #ifdef DUALSTACK_ENTRY_SHIFT
-    /* Diagnostic build: place the entry data at one of eight positions
-       64 bytes apart, each 64-byte aligned, chosen by the global
-       _Py_dualstack_entry_shift (settable from Python through ctypes, so
-       the position can change inside one process). The address used is
-       published in _Py_dualstack_entry_addr. */
+    /* Change the entry address within one process for layout experiments.
+       Align each slot, not just the array: all choices must have the same
+       field alignment. ctypes can set the selector and read back the address. */
     struct _entry_data_s {
         _PyInterpreterDataFrame data;
         _PyStackRef result;
@@ -2088,26 +2086,23 @@ clear_thread_frame(PyThreadState *tstate, _PyControlRecord *frame,
                    _PyInterpreterDataFrame *fp)
 {
     assert(frame->owner == FRAME_OWNED_BY_THREAD);
-    // Make sure that this is, indeed, the top frame. We can't check this in
-    // _PyThreadState_PopFrame, since f_code is already cleared at that point:
+    // Check stack placement while the record still holds its code object.
     assert(frame + 1 == tstate->controlstack_top);
     assert((PyObject **)fp +
            _PyFrame_GetCode(frame)->co_framesize ==
         tstate->datastack_top);
     assert(fp->frame_obj == NULL || fp->frame_obj->f_frame == frame);
-    // Pop the control record before clearing: finalizers run by the clear may
-    // push frames, and they must not see or be charged for the dying frame.
-    // A frame object, if any, takes its copy of the record while it is live.
+    // Pop before running finalizers: a nested call can reuse the control slot.
+    // Transfer an escaping frame first, while its caller is still reachable.
+    // The data frame stays allocated until its references have been cleared.
     PyFrameObject *f = FT_ATOMIC_LOAD_PTR_RELAXED(fp->frame_obj);
     _PyStackRef executable = frame->f_executable;
     _PyStackRef *sp = frame->stackpointer;
     if (f != NULL) {
         FT_ATOMIC_STORE_PTR_RELAXED(fp->frame_obj, NULL);
         if (!_PyObject_IsUniquelyReferenced((PyObject *)f)) {
-            // The frame object outlives the frame: it copies the record and
-            // the locals while both are still on the stacks (it needs the
-            // caller for f_back), which runs no Python code. Pop afterwards,
-            // then drop our reference; the object stays alive elsewhere.
+            // Ownership transfer needs the live record to set f_back, but
+            // runs no Python code. Drop our reference only after the pop.
             _PyFrame_TakeOwnership(f, frame, fp);
             _PyThreadState_PopControl(tstate, frame);
             Py_DECREF(f);
@@ -2115,9 +2110,8 @@ clear_thread_frame(PyThreadState *tstate, _PyControlRecord *frame,
             _PyThreadState_PopDataFrame(tstate, fp);
             return;
         }
-        // The frame object dies with the frame. Its deallocation and the
-        // locals' finalizers may run Python, so pop the record first; the
-        // deallocator never dereferences f_frame of a frame it does not own.
+        // This frame object dies here. Its deallocator does not dereference
+        // f_frame when it does not own the frame, so popping first is safe.
         _PyThreadState_PopControl(tstate, frame);
         Py_DECREF(f);
     }
@@ -2153,8 +2147,8 @@ clear_gen_frame(PyThreadState *tstate, _PyControlRecord *frame,
     else
 #endif
     {
-        // Save the state into the generator and pop the control record first,
-        // so finalizers run by the clear see a consistent control stack.
+        // Preserve the saved record for frame objects and the free-threaded
+        // path. Detach it before clearing references can run finalizers.
         _PyGen_PopFrame(tstate, gen, frame);
         Py_BEGIN_CRITICAL_SECTION(gen);
         _PyFrame_ClearExceptCode(&gen->gi_iframe, fp);
@@ -2181,10 +2175,10 @@ _PyEval_FrameClearAndPop(
     }
 }
 
-/* Create the generator that calling `callable` with these arguments would
-   return, without pushing a frame and running RETURN_GENERATOR. The code
-   must start with RETURN_GENERATOR. Consumes every reference; returns NULL
-   with an exception set. */
+/* Create a generator without pushing a temporary frame or evaluating
+   RETURN_GENERATOR. Callers must check exact positional arguments and that
+   bypassing frame evaluation is allowed. The code starts with RETURN_GENERATOR.
+   Consumes callable, self_or_null and the arguments, including on failure. */
 PyObject *
 _PyEval_MakeGeneratorInPlace(PyThreadState *tstate, _PyStackRef callable,
                              _PyStackRef self_or_null, _PyStackRef *args,
@@ -2205,6 +2199,7 @@ _PyEval_MakeGeneratorInPlace(PyThreadState *tstate, _PyStackRef callable,
     int has_self = !PyStackRef_IsNull(self_or_null);
     _PyControlRecord *gen_frame = &gen->gi_iframe;
     _PyInterpreterDataFrame *gen_data = &gen->gi_data;
+    // The generator outlives this call; borrowed stack references cannot escape.
     _PyFrame_Initialize(tstate, gen_frame, gen_data,
                         PyStackRef_MakeHeapSafe(callable), NULL, code,
                         oparg + has_self);
@@ -2239,12 +2234,12 @@ _PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
     _PyFrame_Initialize(tstate, frame, fp, func, locals, code, 0);
     int err;
     if (kwnames == NULL) {
-        // Positional binding cannot call back into Python.
+        // Binding positional arguments cannot call back into Python.
         err = initialize_locals(tstate, func_obj, fp->localsplus, args, argcount, kwnames);
     }
     else {
-        // Keyword matching may compare str subclasses, which runs Python
-        // while this record is still RESERVED; do not charge it for the slot.
+        // Keyword matching can call a str subclass's comparison method.
+        // Exclude this RESERVED slot from recursion depth during the callback.
         _PyThreadState_AdjustControlLimit(tstate, 1);
         err = initialize_locals(tstate, func_obj, fp->localsplus, args, argcount, kwnames);
         _PyThreadState_AdjustControlLimit(tstate, -1);
@@ -2348,6 +2343,8 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
                PyObject *kwnames)
 {
     PyCodeObject *code = (PyCodeObject *)func->func_code;
+    // Creating the generator here bypasses frame evaluation. Keep the normal
+    // path for eval-frame hooks and coroutine origin tracking.
     if (kwnames == NULL && locals == NULL && argcount <= 8 &&
         tstate->interp->eval_frame == NULL &&
         argcount == (size_t)code->co_argcount &&
@@ -2358,7 +2355,7 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
           tstate->coroutine_origin_tracking_depth != 0) &&
         _PyThreadState_HasStackSpace(tstate, code->co_framesize))
     {
-        /* Generator function: build the generator in place. */
+        /* The argument limit bounds this temporary reference array. */
         _PyStackRef refs[8];
         for (size_t i = 0; i < argcount; i++) {
             refs[i] = PyStackRef_FromPyObjectNew(args[i]);
@@ -2372,9 +2369,9 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
         (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0;
     _PyControlRecord *entry;
     if (exact && _PyThreadState_HasStackSpace(tstate, code->co_framesize)) {
-        /* Room for the entry record, the frame record and its data: reserve
-           all three with the one bounds check just made. Nothing runs
-           between the pushes and the eval loop. */
+        /* Reserve the entry, callee and data with the bounds check above.
+           Exact positional binding cannot call Python, so no callback can
+           observe the partially initialized records. */
         CALL_STAT_INC(frames_pushed);
         _PyThreadState_AdjustControlLimit(tstate, 1);
         entry = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
