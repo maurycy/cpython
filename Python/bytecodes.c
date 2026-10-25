@@ -1700,10 +1700,8 @@ dummy_func(
                 PyGenObject *gen = (PyGenObject *)receiver_o;
                 _PyStackRef value = PyStackRef_MakeHeapSafe(v);
                 DEAD(v);
-                _PyControlRecord *gen_frame = _PyGen_PushFrameUnchecked(tstate, gen, value);
+                _PyControlRecord *gen_frame = _PyGen_PushFrameChain(tstate, gen, value);
                 SYNC_SP();
-                gen->gi_exc_state.previous_item = tstate->exc_info;
-                tstate->exc_info = &gen->gi_exc_state;
                 assert(INSTRUCTION_SIZE + oparg <= UINT16_MAX);
                 frame->return_offset = (uint16_t)(INSTRUCTION_SIZE + oparg);
                 DISPATCH_INLINED(gen_frame);
@@ -1744,9 +1742,7 @@ dummy_func(
             STAT_INC(SEND, hit);
             _PyStackRef value = PyStackRef_MakeHeapSafe(v);
             DEAD(v);
-            _PyControlRecord *pushed_frame = _PyGen_PushFrameUnchecked(tstate, gen, value);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
+            _PyControlRecord *pushed_frame = _PyGen_PushFrameChain(tstate, gen, value);
             assert(INSTRUCTION_SIZE + oparg <= UINT16_MAX);
             frame->return_offset = (uint16_t)(INSTRUCTION_SIZE + oparg);
             gen_frame = PyStackRef_Wrap(pushed_frame);
@@ -4099,9 +4095,7 @@ dummy_func(
             EXIT_IF(!_PyThreadState_HasControlSpace(tstate, 1));
             EXIT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(FOR_ITER, hit);
-            _PyControlRecord *pushed_frame = _PyGen_PushFrameUnchecked(tstate, gen, PyStackRef_None);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
+            _PyControlRecord *pushed_frame = _PyGen_PushFrameChain(tstate, gen, PyStackRef_None);
             // oparg is the return offset from the next instruction.
             frame->return_offset = (uint16_t)(INSTRUCTION_SIZE + oparg);
             gen_frame = PyStackRef_Wrap(pushed_frame);
@@ -4601,7 +4595,7 @@ dummy_func(
             _PyControlRecord *temp = PyStackRef_Unwrap(new_frame);
             DEAD(new_frame);
             SAVE_STACK();
-            assert(_PyFrame_GetCaller(temp) == frame || _PyFrame_GetCaller(_PyFrame_GetCaller(temp)) == frame);
+            assert(temp > frame);
             CALL_STAT_INC(inlined_py_calls);
             assert(temp->state == CONTROL_ACTIVE);
             frame = tstate->current_frame = temp;

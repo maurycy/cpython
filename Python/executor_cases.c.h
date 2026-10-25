@@ -8999,10 +8999,8 @@
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             _PyFrame_SetStackPointer(frame, stack_pointer);
             _PyFrame_StackPointerValidate(frame);
-            _PyControlRecord *pushed_frame = _PyGen_PushFrameUnchecked(tstate, gen, value);
+            _PyControlRecord *pushed_frame = _PyGen_PushFrameChain(tstate, gen, value);
             _PyFrame_StackPointerInvalidate(frame);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
             assert( 2u + oparg <= UINT16_MAX);
             frame->return_offset = (uint16_t)( 2u + oparg);
             gen_frame = PyStackRef_Wrap(pushed_frame);
@@ -16258,10 +16256,8 @@
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             _PyFrame_SetStackPointer(frame, stack_pointer);
             _PyFrame_StackPointerValidate(frame);
-            _PyControlRecord *pushed_frame = _PyGen_PushFrameUnchecked(tstate, gen, PyStackRef_None);
+            _PyControlRecord *pushed_frame = _PyGen_PushFrameChain(tstate, gen, PyStackRef_None);
             _PyFrame_StackPointerInvalidate(frame);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
             frame->return_offset = (uint16_t)( 2u + oparg);
             gen_frame = PyStackRef_Wrap(pushed_frame);
             _tos_cache2 = gen_frame;
@@ -17495,7 +17491,7 @@
             _PyControlRecord *temp = PyStackRef_Unwrap(new_frame);
             _PyFrame_SetStackPointer(frame, stack_pointer);
             _PyFrame_StackPointerValidate(frame);
-            assert(_PyFrame_GetCaller(temp) == frame || _PyFrame_GetCaller(_PyFrame_GetCaller(temp)) == frame);
+            assert(temp > frame);
             CALL_STAT_INC(inlined_py_calls);
             assert(temp->state == CONTROL_ACTIVE);
             frame = tstate->current_frame = temp;

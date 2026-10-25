@@ -224,7 +224,7 @@ do { \
         assert(!IS_PEP523_HOOKED(tstate));                       \
         _PyFrame_SetStackPointer(frame, stack_pointer);          \
         _PyFrame_StackPointerValidate(frame);                    \
-        assert(_PyFrame_GetPrevious(NEW_FRAME) == frame);                  \
+        assert((NEW_FRAME) > frame);                                      \
         frame = tstate->current_frame = (NEW_FRAME);             \
         frame->state = CONTROL_ACTIVE;                          \
         fp = frame->data;                                       \
@@ -586,6 +586,82 @@ gen_try_set_executing(PyGenObject *gen)
         return true;
     }
     return false;
+}
+
+/* Resume `gen` with `value`, following transparent delegation. A generator
+   suspended inside a yield-from or await loop would run RESUME_CHECK,
+   JUMP_BACKWARD_NO_INTERRUPT and SEND_GEN only to push the frame of the
+   generator it delegates to. When the eval breaker would let RESUME_CHECK
+   pass and SEND_GEN would specialise, link that level's record directly and
+   continue with the delegate, so one dispatch reaches the innermost frame.
+   Each level still gets its own control record. Returns the innermost
+   record, which is the one to run. */
+static inline _PyControlRecord *
+_PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value)
+{
+    assert(gen->gi_live_frame == &gen->gi_iframe);
+    _PyControlRecord *first = _PyThreadState_ReserveControlUnchecked(tstate);
+    _PyControlRecord *frame = first;
+    gen->gi_exc_state.previous_item = tstate->exc_info;
+    tstate->exc_info = &gen->gi_exc_state;
+    uintptr_t eval_breaker = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker);
+    for (;;) {
+        _PyControlRecord *saved = &gen->gi_iframe;
+        _Py_CODEUNIT *ip = saved->instr_ptr;
+        if (ip[0].op.code != RESUME_CHECK ||
+            ip[2].op.code != JUMP_BACKWARD_NO_INTERRUPT ||
+            ip[-1].op.code != YIELD_VALUE || ip[-1].op.arg != 1) {
+            break;
+        }
+        _Py_CODEUNIT *send = ip + 3 - ip[2].op.arg;
+        if (send->op.code != SEND_GEN ||
+            !_PyThreadState_HasControlSpace(tstate, 1)) {
+            break;
+        }
+        uintptr_t version = FT_ATOMIC_LOAD_UINTPTR_ACQUIRE(
+            _PyFrame_GetCode(saved)->_co_instrumentation_version);
+        if (eval_breaker != version) {
+            break;
+        }
+#ifdef Py_GIL_DISABLED
+        if (saved->tlbc_index != ((_PyThreadStateImpl *)tstate)->tlbc_index) {
+            break;
+        }
+#endif
+        PyObject *receiver = PyStackRef_AsPyObjectBorrow(saved->stackpointer[-2]);
+        if (Py_TYPE(receiver) != &PyGen_Type && Py_TYPE(receiver) != &PyCoro_Type) {
+            break;
+        }
+        PyGenObject *inner = (PyGenObject *)receiver;
+        if (!gen_try_set_executing(inner)) {
+            break;
+        }
+        _PyGen_LinkFrame(gen, frame, NULL, CONTROL_RESERVED);
+        frame->instr_ptr = send;
+        frame->return_offset = (uint16_t)(1 + INLINE_CACHE_ENTRIES_SEND + send->op.arg);
+        inner->gi_exc_state.previous_item = tstate->exc_info;
+        tstate->exc_info = &inner->gi_exc_state;
+        frame = _PyThreadState_ReserveControlUnchecked(tstate);
+        gen = inner;
+    }
+    int state = frame == first ? CONTROL_ACTIVE : CONTROL_RESERVED;
+    _Py_CODEUNIT *skip = NULL;
+    if (PyStackRef_IsNone(value)) {
+        skip = _PyGen_SkipDiscardedResume(tstate, &gen->gi_iframe);
+    }
+    if (skip != NULL) {
+        _PyGen_LinkFrame(gen, frame, NULL, state);
+        frame->instr_ptr = skip;
+    }
+    else {
+        _PyGen_LinkFrame(gen, frame, &value, state);
+    }
+    if (frame != first) {
+        for (_PyControlRecord *r = first; r <= frame; r++) {
+            r->state = CONTROL_ACTIVE;
+        }
+    }
+    return frame;
 }
 
 // Macro for inplace float binary ops (tier 2 only).
