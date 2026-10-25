@@ -2267,6 +2267,31 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
     if (entry == NULL) {
         return NULL;
     }
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    if (kwnames == NULL && argcount == (size_t)code->co_argcount &&
+        code->co_kwonlyargcount == 0 &&
+        (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0)
+    {
+        /* Exact positional call: bind straight into the frame. */
+        CALL_STAT_INC(frames_pushed);
+        _PyControlRecord *frame = _PyThreadState_PushFrame(tstate, code->co_framesize);
+        if (frame == NULL) {
+            _PyThreadState_PopEntry(tstate, entry);
+            return NULL;
+        }
+        _PyInterpreterDataFrame *fp = frame->data;
+        Py_XINCREF(locals);
+        _PyFrame_Initialize(tstate, frame, fp, PyStackRef_FromPyObjectNew(func),
+                            locals, code, (int)argcount);
+        for (size_t i = 0; i < argcount; i++) {
+            fp->localsplus[i] = PyStackRef_FromPyObjectNew(args[i]);
+        }
+        frame->state = CONTROL_ACTIVE;
+        EVAL_CALL_STAT_INC(EVAL_CALL_VECTOR);
+        PyObject *result = _PyEval_EvalFrame(tstate, frame, 0);
+        _PyThreadState_PopEntry(tstate, entry);
+        return result;
+    }
     size_t total_args = argcount;
     if (kwnames) {
         total_args += PyTuple_GET_SIZE(kwnames);
