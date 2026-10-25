@@ -1258,6 +1258,11 @@ dtrace_function_return(_PyControlRecord *frame)
 }
 #endif
 
+#ifdef DUALSTACK_ENTRY_SHIFT
+Py_EXPORTED_SYMBOL int _Py_dualstack_entry_shift = 0;
+Py_EXPORTED_SYMBOL uintptr_t _Py_dualstack_entry_addr = 0;
+#endif
+
 PyObject* _Py_HOT_FUNCTION DONT_SLP_VECTORIZE
 _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int throwflag)
 {
@@ -1285,19 +1290,19 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
 #endif
     _PyControlRecord *entry = frame - 1;
 #ifdef DUALSTACK_ENTRY_SHIFT
-    /* Diagnostic build: place the entry data at one of eight 64-byte
-       aligned positions chosen by $DUALSTACK_ENTRY_SHIFT, so its address
-       can be moved without moving anything else in this C frame. */
-    static int dualstack_entry_shift = -1;
-    if (dualstack_entry_shift < 0) {
-        const char *e = getenv("DUALSTACK_ENTRY_SHIFT");
-        dualstack_entry_shift = e ? (atoi(e) & 7) : 0;
-    }
-    _Alignas(64) struct _entry_data_s {
+    /* Diagnostic build: place the entry data at one of eight positions
+       64 bytes apart, each 64-byte aligned, chosen by the global
+       _Py_dualstack_entry_shift (settable from Python through ctypes, so
+       the position can change inside one process). The address used is
+       published in _Py_dualstack_entry_addr. */
+    struct _entry_data_s {
         _PyInterpreterDataFrame data;
         _PyStackRef result;
-    } entry_data_arr[8];
-    struct _entry_data_s *entry_data_p = &entry_data_arr[dualstack_entry_shift];
+    };
+    struct _entry_slot_s { _Alignas(64) struct _entry_data_s d; } entry_data_arr[8];
+    _Static_assert(sizeof(struct _entry_slot_s) % 64 == 0, "entry slot stride");
+    struct _entry_data_s *entry_data_p = &entry_data_arr[_Py_dualstack_entry_shift & 7].d;
+    _Py_dualstack_entry_addr = (uintptr_t)entry_data_p;
 #define entry_data (*entry_data_p)
 #else
     struct {
