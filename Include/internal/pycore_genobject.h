@@ -74,29 +74,34 @@ _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 }
 #endif
 
+/* Would RESUME_CHECK pass for this suspended generator right now? */
+static inline int
+_PyGen_ResumeCheckPasses(PyThreadState *tstate, _PyControlRecord *saved)
+{
+    uintptr_t eval_breaker = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker);
+    uintptr_t version = FT_ATOMIC_LOAD_UINTPTR_ACQUIRE(
+        _PyFrame_GetCode(saved)->_co_instrumentation_version);
+#ifdef Py_GIL_DISABLED
+    if (saved->tlbc_index != ((_PyThreadStateImpl *)tstate)->tlbc_index) {
+        return 0;
+    }
+#endif
+    return eval_breaker == version;
+}
+
 /* A suspended generator whose next instructions are RESUME_CHECK and
-   POP_TOP discards the value it is resumed with. When the eval breaker
-   would let RESUME_CHECK pass, both instructions can be skipped and the
-   value need not be pushed. Returns the instruction to resume at, or NULL
-   to take the ordinary path. */
+   POP_TOP discards the value it is resumed with. When RESUME_CHECK would
+   pass, both instructions can be skipped and the value need not be
+   pushed. Returns the instruction to resume at, or NULL to take the
+   ordinary path. */
 static inline _Py_CODEUNIT *
 _PyGen_SkipDiscardedResume(PyThreadState *tstate, _PyControlRecord *saved)
 {
     _Py_CODEUNIT *ip = saved->instr_ptr;
-    if (ip[0].op.code != RESUME_CHECK || ip[2].op.code != POP_TOP) {
+    if (ip[0].op.code != RESUME_CHECK || ip[2].op.code != POP_TOP ||
+        !_PyGen_ResumeCheckPasses(tstate, saved)) {
         return NULL;
     }
-    uintptr_t eval_breaker = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker);
-    uintptr_t version = FT_ATOMIC_LOAD_UINTPTR_ACQUIRE(
-        _PyFrame_GetCode(saved)->_co_instrumentation_version);
-    if (eval_breaker != version) {
-        return NULL;
-    }
-#ifdef Py_GIL_DISABLED
-    if (saved->tlbc_index != ((_PyThreadStateImpl *)tstate)->tlbc_index) {
-        return NULL;
-    }
-#endif
     return ip + 3;
 }
 

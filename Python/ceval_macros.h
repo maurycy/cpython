@@ -604,30 +604,30 @@ _PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value
     _PyControlRecord *frame = first;
     gen->gi_exc_state.previous_item = tstate->exc_info;
     tstate->exc_info = &gen->gi_exc_state;
-    uintptr_t eval_breaker = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker);
+    _Py_CODEUNIT *skip = NULL;
     for (;;) {
         _PyControlRecord *saved = &gen->gi_iframe;
         _Py_CODEUNIT *ip = saved->instr_ptr;
-        if (ip[0].op.code != RESUME_CHECK ||
-            ip[2].op.code != JUMP_BACKWARD_NO_INTERRUPT ||
+        if (ip[0].op.code != RESUME_CHECK) {
+            break;
+        }
+        int next = ip[2].op.code;
+        if (next == POP_TOP) {
+            if (PyStackRef_IsNone(value) && _PyGen_ResumeCheckPasses(tstate, saved)) {
+                skip = ip + 3;
+            }
+            break;
+        }
+        if (next != JUMP_BACKWARD_NO_INTERRUPT ||
             ip[-1].op.code != YIELD_VALUE || ip[-1].op.arg != 1) {
             break;
         }
         _Py_CODEUNIT *send = ip + 3 - ip[2].op.arg;
         if (send->op.code != SEND_GEN ||
-            !_PyThreadState_HasControlSpace(tstate, 1)) {
+            !_PyThreadState_HasControlSpace(tstate, 1) ||
+            !_PyGen_ResumeCheckPasses(tstate, saved)) {
             break;
         }
-        uintptr_t version = FT_ATOMIC_LOAD_UINTPTR_ACQUIRE(
-            _PyFrame_GetCode(saved)->_co_instrumentation_version);
-        if (eval_breaker != version) {
-            break;
-        }
-#ifdef Py_GIL_DISABLED
-        if (saved->tlbc_index != ((_PyThreadStateImpl *)tstate)->tlbc_index) {
-            break;
-        }
-#endif
         PyObject *receiver = PyStackRef_AsPyObjectBorrow(saved->stackpointer[-2]);
         if (Py_TYPE(receiver) != &PyGen_Type && Py_TYPE(receiver) != &PyCoro_Type) {
             break;
@@ -645,10 +645,6 @@ _PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value
         gen = inner;
     }
     int state = frame == first ? CONTROL_ACTIVE : CONTROL_RESERVED;
-    _Py_CODEUNIT *skip = NULL;
-    if (PyStackRef_IsNone(value)) {
-        skip = _PyGen_SkipDiscardedResume(tstate, &gen->gi_iframe);
-    }
     if (skip != NULL) {
         _PyGen_LinkFrame(gen, frame, NULL, state);
         frame->instr_ptr = skip;
