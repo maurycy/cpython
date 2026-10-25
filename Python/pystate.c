@@ -1513,7 +1513,7 @@ static int
 allocate_control_stack(PyThreadState *tstate)
 {
 #ifndef _PY_CONTROLSTACK_RESERVE_SHIFT
-#define _PY_CONTROLSTACK_RESERVE_SHIFT 30
+#define _PY_CONTROLSTACK_RESERVE_SHIFT 26
 #endif
     size_t size = SIZEOF_VOID_P > 4 ? (size_t)1 << _PY_CONTROLSTACK_RESERVE_SHIFT : (size_t)1 << 24;
     void *base;
