@@ -40,7 +40,7 @@ PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
    sent value does not reload it from the bytes just written. When ip is
    not NULL it replaces the saved instruction pointer, so the slot is
    written once with its final contents. */
-static inline void
+static inline Py_ALWAYS_INLINE void
 _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, _Py_CODEUNIT *ip, int state)
 {
     assert(gen->gi_iframe.state == CONTROL_DETACHED);
@@ -142,14 +142,11 @@ _PyGen_PushFrameUnchecked(PyThreadState *tstate, PyGenObject *gen, _PyStackRef v
     assert(gen->gi_live_frame == &gen->gi_iframe);
     // Inlined resume: published ACTIVE, nothing runs before _PUSH_FRAME.
     _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
+    _Py_CODEUNIT *ip = NULL;
     if (PyStackRef_IsNone(value)) {
-        _Py_CODEUNIT *ip = _PyGen_SkipDiscardedResume(tstate, &gen->gi_iframe);
-        if (ip != NULL) {
-            _PyGen_LinkFrame(gen, frame, NULL, ip, CONTROL_ACTIVE);
-            return frame;
-        }
+        ip = _PyGen_SkipDiscardedResume(tstate, &gen->gi_iframe);
     }
-    _PyGen_LinkFrame(gen, frame, &value, NULL, CONTROL_ACTIVE);
+    _PyGen_LinkFrame(gen, frame, ip == NULL ? &value : NULL, ip, CONTROL_ACTIVE);
     return frame;
 }
 
@@ -176,25 +173,26 @@ _PyGen_PushEntryAndFrame(PyThreadState *tstate, PyGenObject *gen,
                          _Py_CODEUNIT *ip)
 {
     assert(gen->gi_live_frame == &gen->gi_iframe);
+    _PyControlRecord *e;
+    _PyControlRecord *frame;
     if (_PyThreadState_HasControlSpace(tstate, 2)) {
         _PyThreadState_AdjustControlLimit(tstate, 1);
-        _PyControlRecord *e = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
+        e = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
         e->owner = FRAME_OWNED_BY_INTERPRETER;
-        _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
-        _PyGen_LinkFrame(gen, frame, value, ip, CONTROL_RESERVED);
-        *entry = e;
-        return frame;
+        frame = _PyThreadState_ReserveControlUnchecked(tstate);
     }
-    _PyControlRecord *e = _PyThreadState_PushEntry(tstate);
-    if (e == NULL) {
-        *entry = NULL;
-        return NULL;
-    }
-    _PyControlRecord *frame = _PyThreadState_PushControl(tstate);
-    if (frame == NULL) {
-        _PyThreadState_PopEntry(tstate, e);
-        *entry = NULL;
-        return NULL;
+    else {
+        e = _PyThreadState_PushEntry(tstate);
+        if (e == NULL) {
+            *entry = NULL;
+            return NULL;
+        }
+        frame = _PyThreadState_PushControl(tstate);
+        if (frame == NULL) {
+            _PyThreadState_PopEntry(tstate, e);
+            *entry = NULL;
+            return NULL;
+        }
     }
     _PyGen_LinkFrame(gen, frame, value, ip, CONTROL_RESERVED);
     *entry = e;
