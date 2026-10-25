@@ -24,17 +24,6 @@ _PyGen_GetGeneratorFromFrame(_PyInterpreterDataFrame *frame)
     return (PyGenObject *)((char *)frame - offsetof(PyGenObject, gi_data));
 }
 
-/* Generator execution state stays in gi_iframe. Its control-stack slot
-   identifies the activation through data, owner and state. */
-static inline _PyControlRecord *
-_PyFrame_FromControlSlot(_PyControlRecord *slot)
-{
-    if (slot->owner == FRAME_OWNED_BY_GENERATOR) {
-        return &_PyGen_GetGeneratorFromFrame(slot->data)->gi_iframe;
-    }
-    return slot;
-}
-
 static inline _PyControlRecord *
 _PyFrame_GetControlSlot(_PyControlRecord *frame)
 {
@@ -45,17 +34,6 @@ _PyFrame_GetControlSlot(_PyControlRecord *frame)
         return gen->gi_control_slot;
     }
     return frame;
-}
-
-static inline void
-_PyFrame_SetState(_PyControlRecord *frame, uint8_t state)
-{
-    if (frame->owner == FRAME_OWNED_BY_GENERATOR) {
-        _PyControlRecord *slot = _PyFrame_GetControlSlot(frame);
-        assert(slot != NULL);
-        slot->state = state;
-    }
-    frame->state = state;
 }
 
 static inline PyCodeObject *_PyFrame_GetCode(_PyControlRecord *f) {
@@ -336,15 +314,31 @@ _PyFrame_IsIncomplete(_PyControlRecord *frame)
                                   _PyFrame_GetCode(frame)->_co_firsttraceable;
 }
 
+/* Ordinary callers are adjacent control records. Only generator slots need
+   an indirection; their activation state lives in gi_iframe. */
+static inline _PyControlRecord *
+_PyFrame_GetCallerFromSlot(_PyControlRecord *slot)
+{
+    for (;;) {
+        --slot;
+        if (slot->state >= CONTROL_ACTIVE) {
+            return slot;
+        }
+        if (slot->state == CONTROL_INDIRECT) {
+            _PyControlRecord *frame =
+                &_PyGen_GetGeneratorFromFrame(slot->data)->gi_iframe;
+            if (frame->state == CONTROL_ACTIVE) {
+                return frame;
+            }
+        }
+    }
+}
+
 static inline _PyControlRecord *
 _PyFrame_GetCaller(_PyControlRecord *frame)
 {
     assert(frame->state != CONTROL_DETACHED && frame->state != CONTROL_BASE);
-    _PyControlRecord *slot = _PyFrame_GetControlSlot(frame);
-    do {
-        --slot;
-    } while (slot->state < CONTROL_ACTIVE);
-    return _PyFrame_FromControlSlot(slot);
+    return _PyFrame_GetCallerFromSlot(_PyFrame_GetControlSlot(frame));
 }
 
 static inline _PyControlRecord *

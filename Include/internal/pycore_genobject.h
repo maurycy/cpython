@@ -33,8 +33,7 @@ _PyGen_ActivateFrame(PyGenObject *gen, _PyControlRecord *slot,
         *frame->stackpointer++ = *value;
     }
     slot->data = &gen->gi_data;
-    slot->owner = FRAME_OWNED_BY_GENERATOR;
-    slot->state = CONTROL_RESERVED;
+    slot->state = CONTROL_INDIRECT;
     frame->state = CONTROL_RESERVED;
     gen->gi_control_slot = slot;
 }
@@ -91,7 +90,7 @@ static inline void
 _PyGen_PopFrame(PyThreadState *tstate, PyGenObject *gen, _PyControlRecord *frame)
 {
     _PyControlRecord *slot = gen->gi_control_slot;
-    _PyFrame_SetState(frame, CONTROL_RESERVED);
+    frame->state = CONTROL_RESERVED;
     _PyGen_UnlinkFrame(gen, frame);
     _PyThreadState_PopControl(tstate, slot);
 }

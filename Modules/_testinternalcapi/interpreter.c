@@ -100,7 +100,7 @@ Test_EvalFrame(PyThreadState *tstate, _PyControlRecord *frame, int throwflag)
 #endif
     /* Push frame */
     entry->state = CONTROL_ACTIVE;
-    _PyFrame_SetState(frame, CONTROL_ACTIVE);
+    frame->state = CONTROL_ACTIVE;
     tstate->current_frame = frame;
     entry_data.data.localsplus[0] = PyStackRef_NULL;
 

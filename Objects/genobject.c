@@ -706,7 +706,7 @@ _gen_throw(PyGenObject *gen, int close_on_genexit,
             return NULL;
         }
         _PyControlRecord *prev = tstate->current_frame;
-        _PyFrame_SetState(frame, CONTROL_ACTIVE);
+        frame->state = CONTROL_ACTIVE;
         tstate->current_frame = frame;
         if (is_gen) {
             ret = _gen_throw((PyGenObject *)yf, close_on_genexit, typ, val, tb);
@@ -716,7 +716,7 @@ _gen_throw(PyGenObject *gen, int close_on_genexit,
         }
         _PyThreadState_UpdateLastProfiledFrame(tstate, frame, prev);
         tstate->current_frame = prev;
-        _PyFrame_SetState(frame, CONTROL_RESERVED);
+        frame->state = CONTROL_RESERVED;
         _PyGen_PopFrame(tstate, gen, frame);
         _PyThreadState_AdjustControlLimit(tstate, -1);
         Py_XDECREF(meth);

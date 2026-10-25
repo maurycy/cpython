@@ -1325,7 +1325,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
 #endif
     /* Push frame */
     entry->state = CONTROL_ACTIVE;
-    _PyFrame_SetState(frame, CONTROL_ACTIVE);
+    frame->state = CONTROL_ACTIVE;
     tstate->current_frame = frame;
     entry_data.data.localsplus[0] = PyStackRef_NULL;
 #ifdef _Py_TIER2
@@ -2092,7 +2092,7 @@ clear_gen_frame(PyThreadState *tstate, _PyControlRecord *frame,
     assert(tstate->exc_info == &gen->gi_exc_state);
     tstate->exc_info = gen->gi_exc_state.previous_item;
     gen->gi_exc_state.previous_item = NULL;
-    _PyFrame_SetState(frame, CONTROL_DETACHED);
+    frame->state = CONTROL_DETACHED;
     _PyThreadState_AdjustControlLimit(tstate, 1);
     Py_BEGIN_CRITICAL_SECTION(gen);
     assert(fp->frame_obj == NULL || fp->frame_obj->f_frame == frame);
