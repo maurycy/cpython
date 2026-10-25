@@ -1284,7 +1284,27 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
 #endif
 #endif
     _PyControlRecord *entry = frame - 1;
-    _PyInterpreterDataFrame *entry_data = entry->data;
+#ifdef DUALSTACK_ENTRY_SHIFT
+    /* Diagnostic build: place the entry data at one of eight 64-byte
+       aligned positions chosen by $DUALSTACK_ENTRY_SHIFT, so its address
+       can be moved without moving anything else in this C frame. */
+    static int dualstack_entry_shift = -1;
+    if (dualstack_entry_shift < 0) {
+        const char *e = getenv("DUALSTACK_ENTRY_SHIFT");
+        dualstack_entry_shift = e ? (atoi(e) & 7) : 0;
+    }
+    _Alignas(64) struct _entry_data_s {
+        _PyInterpreterDataFrame data;
+        _PyStackRef result;
+    } entry_data_arr[8];
+    struct _entry_data_s *entry_data_p = &entry_data_arr[dualstack_entry_shift];
+#define entry_data (*entry_data_p)
+#else
+    struct {
+        _PyInterpreterDataFrame data;
+        _PyStackRef result;
+    } entry_data;
+#endif
     _PyInterpreterDataFrame *fp = frame->data;
 
     if (_Py_EnterRecursiveCallTstate(tstate, "")) {
@@ -1297,21 +1317,21 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
      * These are cached values from the frame and code object.  */
     _Py_CODEUNIT *next_instr;
     _PyStackRef *stack_pointer;
+    entry->data = &entry_data.data;
+    entry_data.result = PyStackRef_NULL;
 #ifdef Py_STACKREF_DEBUG
-    entry_data->f_funcobj = PyStackRef_None;
+    entry_data.data.f_funcobj = PyStackRef_None;
 #elif defined(Py_DEBUG)
     /* Set these to invalid but identifiable values for debugging. */
-    entry_data->f_funcobj = (_PyStackRef){.bits = 0xaaa0};
-    entry_data->frame_obj = (PyFrameObject*)0xaaa2;
-    entry_data->f_globals = (PyObject*)0xaaa3;
-    entry_data->f_builtins = (PyObject*)0xaaa4;
+    entry_data.data.f_funcobj = (_PyStackRef){.bits = 0xaaa0};
+    entry_data.data.f_locals = (PyObject*)0xaaa1;
+    entry_data.data.frame_obj = (PyFrameObject*)0xaaa2;
+    entry_data.data.f_globals = (PyObject*)0xaaa3;
+    entry_data.data.f_builtins = (PyObject*)0xaaa4;
 #endif
-    /* The entry's data lives on the data stack; keep a native stack anchor
-       for out-of-process readers in the otherwise unused f_locals slot. */
-    entry_data->f_locals = (PyObject *)&next_instr;
     entry->f_executable = PyStackRef_None;
     entry->instr_ptr = (_Py_CODEUNIT *)_Py_INTERPRETER_TRAMPOLINE_INSTRUCTIONS + 1;
-    entry->stackpointer = entry_data->localsplus + 1;
+    entry->stackpointer = entry_data.data.localsplus + 1;
     entry->owner = FRAME_OWNED_BY_INTERPRETER;
     entry->visited = 0;
     entry->return_offset = 0;
@@ -1323,11 +1343,11 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
     entry->state = CONTROL_ACTIVE;
     frame->state = CONTROL_ACTIVE;
     tstate->current_frame = frame;
-    entry_data->localsplus[0] = PyStackRef_NULL;
+    entry_data.data.localsplus[0] = PyStackRef_NULL;
 #ifdef _Py_TIER2
     if (tstate->current_executor != NULL) {
         assert(Py_TYPE(tstate->current_executor) == &_PyUOpExecutor_Type);
-        entry_data->localsplus[0] = PyStackRef_FromPyObjectNew(tstate->current_executor);
+        entry_data.data.localsplus[0] = PyStackRef_FromPyObjectNew(tstate->current_executor);
         tstate->current_executor = NULL;
     }
 #endif
@@ -2338,14 +2358,14 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
         code->co_kwonlyargcount == 0 &&
         (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0;
     _PyControlRecord *entry;
-    if (exact && _PyThreadState_HasControlSpace(tstate, 2) &&
-        _PyThreadState_HasEntrySpace(tstate, (int)code->co_framesize)) {
-        /* Room for the entry record and its data, the frame record and its
-           data: reserve all of it with the bounds checks just made. Nothing
-           runs between the pushes and the eval loop. */
+    if (exact && _PyThreadState_HasStackSpace(tstate, code->co_framesize)) {
+        /* Room for the entry record, the frame record and its data: reserve
+           all three with the one bounds check just made. Nothing runs
+           between the pushes and the eval loop. */
         CALL_STAT_INC(frames_pushed);
         _PyThreadState_AdjustControlLimit(tstate, 1);
-        entry = _PyThreadState_PushEntryUnchecked(tstate);
+        entry = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
+        entry->owner = FRAME_OWNED_BY_INTERPRETER;
         _PyControlRecord *frame = _PyThreadState_PushFrameUnchecked(
             tstate, (int)code->co_framesize);
         _PyInterpreterDataFrame *fp = frame->data;

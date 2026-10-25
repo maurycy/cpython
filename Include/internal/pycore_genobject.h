@@ -168,10 +168,10 @@ _PyGen_PushEntryAndFrame(PyThreadState *tstate, PyGenObject *gen,
                          _PyControlRecord **entry)
 {
     assert(gen->gi_live_frame == &gen->gi_iframe);
-    if (_PyThreadState_HasControlSpace(tstate, 2) &&
-        _PyThreadState_HasEntrySpace(tstate, 0)) {
+    if (_PyThreadState_HasControlSpace(tstate, 2)) {
         _PyThreadState_AdjustControlLimit(tstate, 1);
-        _PyControlRecord *e = _PyThreadState_PushEntryUnchecked(tstate);
+        _PyControlRecord *e = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
+        e->owner = FRAME_OWNED_BY_INTERPRETER;
         _PyControlRecord *frame = _PyThreadState_ReserveControlUnchecked(tstate);
         _PyGen_LinkFrame(gen, frame, NULL, CONTROL_RESERVED);
         *entry = e;
