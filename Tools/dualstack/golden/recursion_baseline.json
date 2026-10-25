@@ -1,0 +1,30 @@
+{
+ "limit": 1000,
+ "python": "/Users/maurycy/work/cpython-dual-stack-base/python.exe",
+ "results": {
+  "plain": 998,
+  "method": 997,
+  "yield_from_chain": 997,
+  "generator_for_loop": 997,
+  "next_from_c": 997,
+  "gen_send_from_c": 997,
+  "await_chain": 997,
+  "init_shim": 503,
+  "init_shim_super": 334,
+  "property_getter": 1085,
+  "getattr_hook": 997,
+  "dunder_call": 997,
+  "eval_entry": 499,
+  "exec_entry": 499,
+  "map_callback": 998,
+  "sort_key_callback": 998,
+  "gen_throw_chain": 997,
+  "throw_into_chain_depth": 4000,
+  "close_chain_depth": 4000,
+  "del_during_unwind": 998,
+  "limit_raised_midway": 1998,
+  "limit_lowered_midway": 498,
+  "handler_recursion": 998,
+  "thread_plain": 996
+ }
+}

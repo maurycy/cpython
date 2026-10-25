@@ -253,32 +253,38 @@ gen_raise_already_executing_error(PyGenObject *gen)
     PyErr_SetString(PyExc_ValueError, msg);
 }
 
-// Send 'arg' into 'gen'. On success, return PYGEN_NEXT or PYGEN_RETURN.
-// Returns PYGEN_ERROR on failure. 'presult' is set to the yielded or
-// returned value.
-// The generator must be in the FRAME_EXECUTING state when this function
-// is called.
-static PySendResult
-gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
+// Send 'arg' into an executing generator. Return the yielded or returned
+// value with PYGEN_NEXT or PYGEN_RETURN, or NULL with PYGEN_ERROR.
+static PySendResultPair
+gen_send_ex2_pair(PyGenObject *gen, PyObject *arg, int exc)
 {
     assert(FT_ATOMIC_LOAD_INT8_RELAXED(gen->gi_frame_state) == FRAME_EXECUTING);
 
     PyThreadState *tstate = _PyThreadState_GET();
-    _PyControlRecord *entry = _PyThreadState_PushEntry(tstate);
-    _PyControlRecord *frame = entry == NULL ? NULL : _PyGen_PushFrame(tstate, gen);
+
+    /* Choose the resume address and sent value before copying the record.
+       This avoids storing the saved IP/SP only to reload and replace them
+       in the live slot. */
+    PyObject *arg_obj = arg ? arg : Py_None;
+    _Py_CODEUNIT *ip = NULL;
+    if (arg_obj == Py_None) {
+        ip = _PyGen_SkipDiscardedResume(tstate, &gen->gi_iframe);
+    }
+    _PyStackRef value = PyStackRef_NULL;
+    if (ip == NULL) {
+        value = PyStackRef_FromPyObjectNew(arg_obj);
+    }
+    _PyControlRecord *entry;
+    _PyControlRecord *frame = _PyGen_PushEntryAndFrame(
+        tstate, gen, &entry, ip == NULL ? &value : NULL, ip);
     if (frame == NULL) {
-        if (entry != NULL) {
-            _PyThreadState_PopEntry(tstate, entry);
+        if (ip == NULL) {
+            PyStackRef_CLOSE(value);
         }
         FT_ATOMIC_STORE_INT8_RELEASE(gen->gi_frame_state, FRAME_CLEARED);
         gen_clear_frame(gen);
-        *presult = NULL;
-        return PYGEN_ERROR;
+        return (PySendResultPair){NULL, PYGEN_ERROR};
     }
-
-    /* Push arg onto the frame's value stack */
-    PyObject *arg_obj = arg ? arg : Py_None;
-    _PyFrame_StackPush(frame, PyStackRef_FromPyObjectNew(arg_obj));
 
     _PyErr_StackItem *prev_exc_info = tstate->exc_info;
     gen->gi_exc_state.previous_item = prev_exc_info;
@@ -311,8 +317,7 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
 #ifndef Py_GIL_DISABLED
         assert(FRAME_STATE_SUSPENDED(gen->gi_frame_state));
 #endif
-        *presult = result;
-        return PYGEN_NEXT;
+        return (PySendResultPair){result, PYGEN_NEXT};
     }
 
     assert(return_kind == GENERATOR_RETURN);
@@ -334,16 +339,22 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
             !PyErr_ExceptionMatches(PyExc_StopAsyncIteration));
     }
 
-    *presult = result;
-    return result ? PYGEN_RETURN : PYGEN_ERROR;
+    return (PySendResultPair){result, result ? PYGEN_RETURN : PYGEN_ERROR};
 }
 
-// Set the generator 'gen' to the executing state and send 'arg' into it.
-// See gen_send_ex2() for details.
 static PySendResult
-gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
+gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
 {
-    *presult = NULL;
+    PySendResultPair pair = gen_send_ex2_pair(gen, arg, exc);
+    *presult = pair.object;
+    return pair.kind;
+}
+
+// Set 'gen' to the executing state and send 'arg' into it.
+// See gen_send_ex2_pair() for the result convention.
+static PySendResultPair
+gen_send_pair(PyGenObject *gen, PyObject *arg)
+{
     int8_t frame_state = FT_ATOMIC_LOAD_INT8_RELAXED(gen->gi_frame_state);
     do {
         if (frame_state == FRAME_CREATED && arg && arg != Py_None) {
@@ -357,11 +368,11 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
                         "just-started async generator";
             }
             PyErr_SetString(PyExc_TypeError, msg);
-            return PYGEN_ERROR;
+            return (PySendResultPair){NULL, PYGEN_ERROR};
         }
         if (frame_state == FRAME_EXECUTING) {
             gen_raise_already_executing_error(gen);
-            return PYGEN_ERROR;
+            return (PySendResultPair){NULL, PYGEN_ERROR};
         }
         if (FRAME_STATE_FINISHED(frame_state)) {
             if (PyCoro_CheckExact(gen)) {
@@ -375,17 +386,33 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
             else if (arg) {
                 /* `gen` is an exhausted generator:
                 only return value if called from send(). */
-                *presult = Py_None;
-                return PYGEN_RETURN;
+                return (PySendResultPair){Py_None, PYGEN_RETURN};
             }
-            return PYGEN_ERROR;
+            return (PySendResultPair){NULL, PYGEN_ERROR};
         }
 
         assert((frame_state == FRAME_CREATED) ||
                FRAME_STATE_SUSPENDED(frame_state));
     } while (!_Py_GEN_TRY_SET_FRAME_STATE(gen, frame_state, FRAME_EXECUTING));
 
-    return gen_send_ex2(gen, arg, presult, 0);
+    return gen_send_ex2_pair(gen, arg, 0);
+}
+
+static PySendResult
+gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
+{
+    PySendResultPair pair = gen_send_pair(gen, arg);
+    *presult = pair.object;
+    return pair.kind;
+}
+
+/* Resume an exact generator or coroutine with None. Return the status and
+   value together so the caller does not need an output parameter. */
+PySendResultPair
+_PyGen_SendNone(PyObject *self)
+{
+    assert(PyGen_CheckExact(self) || PyCoro_CheckExact(self));
+    return gen_send_pair(_PyGen_CAST(self), Py_None);
 }
 
 static PySendResult
@@ -1031,10 +1058,10 @@ static PyMemberDef gen_memberlist[] = {
 #ifdef Py_GIL_DISABLED
 static void
 gen_copy_frame(PyGenObject *gen, _PyControlRecord *dest,
-               PyFrameObject *f, _PyCStackRef *value_ref)
+               PyFrameObject *f, _PyCStackRef *value_ref, int state)
 {
     *dest = *gen->gi_live_frame;
-    dest->state = dest == &gen->gi_iframe ? CONTROL_DETACHED : CONTROL_RESERVED;
+    dest->state = (uint8_t)state;
     if (value_ref != NULL) {
         *dest->stackpointer++ = _PyThreadState_PopCStackRefSteal(
             _PyThreadState_GET(), value_ref);
@@ -1046,7 +1073,7 @@ gen_copy_frame(PyGenObject *gen, _PyControlRecord *dest,
 }
 
 static void
-gen_transfer_frame(PyGenObject *gen, _PyControlRecord *dest, _PyStackRef *value)
+gen_transfer_frame(PyGenObject *gen, _PyControlRecord *dest, _PyStackRef *value, int state)
 {
     _PyCStackRef value_ref;
     if (value != NULL) {
@@ -1057,26 +1084,29 @@ gen_transfer_frame(PyGenObject *gen, _PyControlRecord *dest, _PyStackRef *value)
     PyFrameObject *f = gen->gi_data.frame_obj;
     if (f != NULL) {
         Py_BEGIN_CRITICAL_SECTION(f);
-        gen_copy_frame(gen, dest, f, value != NULL ? &value_ref : NULL);
+        gen_copy_frame(gen, dest, f, value != NULL ? &value_ref : NULL, state);
         Py_END_CRITICAL_SECTION();
     }
     else {
-        gen_copy_frame(gen, dest, NULL, value != NULL ? &value_ref : NULL);
+        gen_copy_frame(gen, dest, NULL, value != NULL ? &value_ref : NULL, state);
     }
     Py_END_CRITICAL_SECTION();
 }
 
 void
-_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value)
+_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, _Py_CODEUNIT *ip, int state)
 {
-    gen_transfer_frame(gen, frame, value);
+    gen_transfer_frame(gen, frame, value, state);
+    if (ip != NULL) {
+        frame->instr_ptr = ip;
+    }
 }
 
 void
 _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 {
     assert(gen->gi_live_frame == frame);
-    gen_transfer_frame(gen, &gen->gi_iframe, NULL);
+    gen_transfer_frame(gen, &gen->gi_iframe, NULL, CONTROL_DETACHED);
 }
 #endif
 

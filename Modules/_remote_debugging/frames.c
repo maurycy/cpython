@@ -312,6 +312,44 @@ process_frame_chain(
     ctx->stopped_at_cached_frame = 0;
     ctx->last_frame_visited = 0;
 
+    /* This prototype uses a zero previous offset to identify control records.
+       Read the array from base through current in one call, then walk it
+       downward. Code objects still need separate reads; this is not an atomic
+       snapshot of the target. Setting DUALSTACK_READER_INDIVIDUAL to any value
+       selects per-record reads for the measurement ablation. */
+    int control_stack = unwinder->debug_offsets.interpreter_frame.previous == 0;
+    size_t record_size = (size_t)unwinder->debug_offsets.interpreter_frame.size;
+    char *records = NULL;
+    uintptr_t records_base = 0;
+    if (control_stack) {
+        if (ctx->base_frame_addr == 0 || frame_addr < ctx->base_frame_addr ||
+            (frame_addr - ctx->base_frame_addr) / record_size > MAX_FRAME_CHAIN_DEPTH) {
+            PyErr_Format(PyExc_RuntimeError,
+                "Control stack bounds: current 0x%lx base 0x%lx", frame_addr, ctx->base_frame_addr);
+            set_exception_cause(unwinder, PyExc_RuntimeError, "Control stack bounds check failed");
+            PyMem_Free(records);
+            return -1;
+        }
+        if (getenv("DUALSTACK_READER_INDIVIDUAL") == NULL) {
+            records_base = ctx->base_frame_addr;
+            size_t len = frame_addr - records_base + record_size;
+            records = PyMem_Malloc(len);
+            if (records == NULL) {
+                PyErr_NoMemory();
+                PyMem_Free(records);
+                return -1;
+            }
+            if (_Py_RemoteDebug_ReadRemoteMemory(&unwinder->handle, records_base, len, records) < 0) {
+                PyMem_Free(records);
+                set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read the control stack");
+                PyMem_Free(records);
+                return -1;
+            }
+            STATS_INC(unwinder, memory_reads);
+            STATS_ADD(unwinder, memory_bytes_read, len);
+        }
+    }
+
     while ((void*)frame_addr != NULL) {
         int parse_result = 0;
         PyObject *frame = NULL;
@@ -322,9 +360,32 @@ process_frame_chain(
         if (++frame_count > MAX_FRAME_CHAIN_DEPTH) {
             PyErr_SetString(PyExc_RuntimeError, "Too many stack frames (possible infinite loop)");
             set_exception_cause(unwinder, PyExc_RuntimeError, "Frame chain iteration limit exceeded");
+            PyMem_Free(records);
             return -1;
         }
         assert(frame_count <= MAX_FRAME_CHAIN_DEPTH);
+
+        if (control_stack) {
+            uintptr_t address_of_code_object = 0;
+            uintptr_t unused_previous = 0;
+            if (records != NULL) {
+                parse_result = parse_frame_buffer(
+                    unwinder, &frame, records + (frame_addr - records_base),
+                    &address_of_code_object, &unused_previous);
+            }
+            else {
+                parse_result = parse_frame_object(
+                    unwinder, &frame, frame_addr,
+                    &address_of_code_object, &unused_previous);
+            }
+            if (parse_result < 0) {
+                set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to parse control record");
+                PyMem_Free(records);
+                return -1;
+            }
+            next_frame_addr = frame_addr == ctx->base_frame_addr ? 0 : frame_addr - record_size;
+            goto parsed_frame;
+        }
 
         if (ctx->chunks && ctx->chunks->count > 0) {
             parse_result = parse_frame_from_chunks(
@@ -348,6 +409,7 @@ process_frame_chain(
             }
             if (parse_result < 0) {
                 set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to parse frame object in chain");
+                PyMem_Free(records);
                 return -1;
             }
         }
@@ -383,12 +445,14 @@ parsed_frame:
                 unwinder, _Py_LATIN1_CHR('~'), Py_None, extra_frame, Py_None);
             if (extra_frame_info == NULL) {
                 Py_XDECREF(frame);
+                PyMem_Free(records);
                 return -1;
             }
             if (PyList_Append(ctx->frame_info, extra_frame_info) < 0) {
                 Py_DECREF(extra_frame_info);
                 Py_XDECREF(frame);
                 set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to append extra frame");
+                PyMem_Free(records);
                 return -1;
             }
             if (ctx->frame_addrs && ctx->num_addrs < ctx->max_addrs) {
@@ -403,12 +467,14 @@ parsed_frame:
                 PyErr_Format(PyExc_RuntimeError, f, prev_frame_addr, frame_addr);
                 Py_DECREF(frame);
                 set_exception_cause(unwinder, PyExc_RuntimeError, "Frame chain consistency check failed");
+                PyMem_Free(records);
                 return -1;
             }
 
             if (PyList_Append(ctx->frame_info, frame) < 0) {
                 Py_DECREF(frame);
                 set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to append frame");
+                PyMem_Free(records);
                 return -1;
             }
             if (ctx->frame_addrs && ctx->num_addrs < ctx->max_addrs) {
@@ -427,10 +493,13 @@ parsed_frame:
         frame_addr = next_frame_addr;
     }
 
+    PyMem_Free(records);
+
     if (!ctx->stopped_at_cached_frame && ctx->base_frame_addr != 0 && last_frame_addr != ctx->base_frame_addr) {
         PyErr_Format(PyExc_RuntimeError,
             "Incomplete sample: did not reach base frame (expected 0x%lx, got 0x%lx)",
             ctx->base_frame_addr, last_frame_addr);
+        PyMem_Free(records);
         return -1;
     }
 

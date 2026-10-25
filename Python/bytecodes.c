@@ -1700,10 +1700,8 @@ dummy_func(
                 PyGenObject *gen = (PyGenObject *)receiver_o;
                 _PyStackRef value = PyStackRef_MakeHeapSafe(v);
                 DEAD(v);
-                _PyControlRecord *gen_frame = _PyGen_PushFrameUnchecked(tstate, gen, value);
+                _PyControlRecord *gen_frame = _PyGen_PushFrameChain(tstate, gen, value);
                 SYNC_SP();
-                gen->gi_exc_state.previous_item = tstate->exc_info;
-                tstate->exc_info = &gen->gi_exc_state;
                 assert(INSTRUCTION_SIZE + oparg <= UINT16_MAX);
                 frame->return_offset = (uint16_t)(INSTRUCTION_SIZE + oparg);
                 DISPATCH_INLINED(gen_frame);
@@ -1744,9 +1742,7 @@ dummy_func(
             STAT_INC(SEND, hit);
             _PyStackRef value = PyStackRef_MakeHeapSafe(v);
             DEAD(v);
-            _PyControlRecord *pushed_frame = _PyGen_PushFrameUnchecked(tstate, gen, value);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
+            _PyControlRecord *pushed_frame = _PyGen_PushFrameChain(tstate, gen, value);
             assert(INSTRUCTION_SIZE + oparg <= UINT16_MAX);
             frame->return_offset = (uint16_t)(INSTRUCTION_SIZE + oparg);
             gen_frame = PyStackRef_Wrap(pushed_frame);
@@ -4099,9 +4095,7 @@ dummy_func(
             EXIT_IF(!_PyThreadState_HasControlSpace(tstate, 1));
             EXIT_IF(!gen_try_set_executing((PyGenObject *)gen));
             STAT_INC(FOR_ITER, hit);
-            _PyControlRecord *pushed_frame = _PyGen_PushFrameUnchecked(tstate, gen, PyStackRef_None);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
+            _PyControlRecord *pushed_frame = _PyGen_PushFrameChain(tstate, gen, PyStackRef_None);
             // oparg is the return offset from the next instruction.
             frame->return_offset = (uint16_t)(INSTRUCTION_SIZE + oparg);
             gen_frame = PyStackRef_Wrap(pushed_frame);
@@ -4317,6 +4311,7 @@ dummy_func(
         family(CALL, INLINE_CACHE_ENTRIES_CALL) = {
             CALL_BOUND_METHOD_EXACT_ARGS,
             CALL_PY_EXACT_ARGS,
+            CALL_PY_GEN_EXACT_ARGS,
             CALL_TYPE_1,
             CALL_STR_1,
             CALL_TUPLE_1,
@@ -4601,9 +4596,9 @@ dummy_func(
             _PyControlRecord *temp = PyStackRef_Unwrap(new_frame);
             DEAD(new_frame);
             SAVE_STACK();
-            assert(_PyFrame_GetCaller(temp) == frame || _PyFrame_GetCaller(_PyFrame_GetCaller(temp)) == frame);
+            assert(temp > frame);
             CALL_STAT_INC(inlined_py_calls);
-            temp->state = CONTROL_ACTIVE;
+            assert(temp->state == CONTROL_ACTIVE);
             frame = tstate->current_frame = temp;
             fp = frame->data;
             RELOAD_STACK();
@@ -4639,6 +4634,31 @@ dummy_func(
             _INIT_CALL_PY_EXACT_ARGS +
             _SAVE_RETURN_OFFSET +
             _PUSH_FRAME;
+
+        /* Build the saved record and data directly in the generator, avoiding
+           a temporary frame and RETURN_GENERATOR. Specialization excludes code
+           starting with MAKE_CELL or COPY_FREE_VARS. The call macro checks the
+           eval-frame hook before taking this path. */
+        op(_INIT_CALL_PY_GEN_EXACT_ARGS, (callable, self_or_null, args[oparg] -- res)) {
+            PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(callable);
+            PyCodeObject *code = (PyCodeObject *)func->func_code;
+            DEOPT_IF((code->co_flags & CO_COROUTINE) &&
+                     tstate->coroutine_origin_tracking_depth != 0);
+            STAT_INC(CALL, hit);
+            PyObject *gen = _PyEval_MakeGeneratorInPlace(tstate, callable, self_or_null, args, oparg);
+            INPUTS_DEAD();
+            ERROR_IF(gen == NULL);
+            res = PyStackRef_FromPyObjectStealMortal(gen);
+        }
+
+        macro(CALL_PY_GEN_EXACT_ARGS) =
+            _RECORD_CALLABLE +
+            unused/1 + // Skip over the counter
+            _CHECK_PEP_523 +
+            _CHECK_FUNCTION_VERSION +
+            _CHECK_FUNCTION_EXACT_ARGS +
+            _CHECK_STACK_SPACE +
+            _INIT_CALL_PY_GEN_EXACT_ARGS;
 
         op(_GUARD_NOS_NULL, (null, unused -- null, unused)) {
             EXIT_IF(!PyStackRef_IsNull(null));
@@ -4769,10 +4789,27 @@ dummy_func(
             assert(_PyFrame_GetBytecode(shim)[1].op.code == RETURN_VALUE);
             /* Push self onto stack of shim */
             shim->data->localsplus[0] = PyStackRef_DUP(self);
-            _PyThreadState_AdjustControlLimit(tstate, 1);
-            _PyControlRecord *temp = _PyEvalFramePushAndInit(
-                tstate, init, NULL, args-1, oparg+1, NULL);
-            _PyThreadState_AdjustControlLimit(tstate, -1);
+            PyCodeObject *init_code = (PyCodeObject *)((PyFunctionObject *)PyStackRef_AsPyObjectBorrow(init))->func_code;
+            _PyControlRecord *temp;
+            if (init_code->co_argcount == oparg + 1 &&
+                init_code->co_kwonlyargcount == 0 &&
+                (init_code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0)
+            {
+                /* Bind self and the exact positional arguments directly.
+                   _ALLOCATE_OBJECT checked space for this frame and the shim. */
+                temp = _PyFrame_PushUnchecked(tstate, init, oparg + 1);
+                _PyStackRef *locals = temp->data->localsplus;
+                locals[0] = self;
+                for (int i = 0; i < oparg; i++) {
+                    locals[1 + i] = args[i];
+                }
+            }
+            else {
+                /* Binding positional arguments cannot call Python, so the
+                   shim needs no recursion-limit adjustment during binding. */
+                temp = _PyEvalFramePushAndInit(
+                    tstate, init, NULL, args-1, oparg+1, NULL);
+            }
             DEAD(init);
             DEAD(self);
             DEAD(args);
@@ -4795,7 +4832,7 @@ dummy_func(
             _CREATE_INIT_FRAME +
             _PUSH_FRAME;
 
-        inst(EXIT_INIT_CHECK, (should_be_none -- )) {
+        op(_EXIT_INIT_CHECK, (should_be_none -- )) {
             if (!PyStackRef_IsNone(should_be_none)) {
                 PyErr_Format(PyExc_TypeError,
                     "__init__() should return None, not '%.200s'",
@@ -4804,6 +4841,14 @@ dummy_func(
             }
             DEAD(should_be_none);
         }
+
+        /* Return self in the same dispatch after checking __init__'s result.
+           Keep the following RETURN_VALUE in the shim's bytecode for code
+           that inspects the instruction sequence. */
+        macro(EXIT_INIT_CHECK) =
+            _EXIT_INIT_CHECK +
+            _MAKE_HEAP_SAFE +
+            _RETURN_VALUE;
 
         op(_GUARD_CALLABLE_BUILTIN_CLASS, (callable, unused, unused[oparg] -- callable, unused, unused[oparg])) {
             PyObject *callable_o = PyStackRef_AsPyObjectBorrow(callable);
@@ -5825,8 +5870,9 @@ dummy_func(
             gen_frame->owner = FRAME_OWNED_BY_GENERATOR;
             _PyControlRecord *prev = _PyFrame_GetCaller(frame);
             _PyThreadState_UpdateLastProfiledFrame(tstate, frame, prev);
+            tstate->current_frame = prev;
             _PyThreadState_PopFrame(tstate, frame, fp);
-            frame = tstate->current_frame = prev;
+            frame = prev;
             fp = frame->data;
             LOAD_IP(frame->return_offset);
             RELOAD_STACK();

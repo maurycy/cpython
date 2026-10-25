@@ -721,7 +721,7 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
     _PyControlRecord *frame = f->f_frame;
     if (tstate->controlstack_top < tstate->base_frame + 3 ||
         frame != tstate->controlstack_top - 1 ||
-        frame->state != CONTROL_RESERVED ||
+        (frame->state != CONTROL_RESERVED && frame->state != CONTROL_ACTIVE) ||
         (frame - 1)->state != CONTROL_RESERVED ||
         (frame - 1)->owner != FRAME_OWNED_BY_INTERPRETER)
     {
@@ -1258,6 +1258,11 @@ dtrace_function_return(_PyControlRecord *frame)
 }
 #endif
 
+#ifdef DUALSTACK_ENTRY_SHIFT
+Py_EXPORTED_SYMBOL int _Py_dualstack_entry_shift = 0;
+Py_EXPORTED_SYMBOL uintptr_t _Py_dualstack_entry_addr = 0;
+#endif
+
 PyObject* _Py_HOT_FUNCTION DONT_SLP_VECTORIZE
 _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int throwflag)
 {
@@ -1284,10 +1289,25 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
 #endif
 #endif
     _PyControlRecord *entry = frame - 1;
+#ifdef DUALSTACK_ENTRY_SHIFT
+    /* Change the entry address within one process for layout experiments.
+       Align each slot, not just the array: all choices must have the same
+       field alignment. ctypes can set the selector and read back the address. */
+    struct _entry_data_s {
+        _PyInterpreterDataFrame data;
+        _PyStackRef result;
+    };
+    struct _entry_slot_s { _Alignas(64) struct _entry_data_s d; } entry_data_arr[8];
+    _Static_assert(sizeof(struct _entry_slot_s) % 64 == 0, "entry slot stride");
+    struct _entry_data_s *entry_data_p = &entry_data_arr[_Py_dualstack_entry_shift & 7].d;
+    _Py_dualstack_entry_addr = (uintptr_t)entry_data_p;
+#define entry_data (*entry_data_p)
+#else
     struct {
         _PyInterpreterDataFrame data;
         _PyStackRef result;
     } entry_data;
+#endif
     _PyInterpreterDataFrame *fp = frame->data;
 
     if (_Py_EnterRecursiveCallTstate(tstate, "")) {
@@ -2066,19 +2086,47 @@ clear_thread_frame(PyThreadState *tstate, _PyControlRecord *frame,
                    _PyInterpreterDataFrame *fp)
 {
     assert(frame->owner == FRAME_OWNED_BY_THREAD);
-    // Make sure that this is, indeed, the top frame. We can't check this in
-    // _PyThreadState_PopFrame, since f_code is already cleared at that point:
+    // Check stack placement while the record still holds its code object.
     assert(frame + 1 == tstate->controlstack_top);
     assert((PyObject **)fp +
            _PyFrame_GetCode(frame)->co_framesize ==
         tstate->datastack_top);
     assert(fp->frame_obj == NULL || fp->frame_obj->f_frame == frame);
-    frame->state = CONTROL_RESERVED;
-    _PyThreadState_AdjustControlLimit(tstate, 1);
-    _PyFrame_ClearExceptCode(frame, fp);
-    PyStackRef_CLEAR(frame->f_executable);
-    _PyThreadState_PopFrame(tstate, frame, fp);
-    _PyThreadState_AdjustControlLimit(tstate, -1);
+    // Pop before running finalizers: a nested call can reuse the control slot.
+    // Transfer an escaping frame first, while its caller is still reachable.
+    // The data frame stays allocated until its references have been cleared.
+    PyFrameObject *f = FT_ATOMIC_LOAD_PTR_RELAXED(fp->frame_obj);
+    _PyStackRef executable = frame->f_executable;
+    _PyStackRef *sp = frame->stackpointer;
+    if (f != NULL) {
+        FT_ATOMIC_STORE_PTR_RELAXED(fp->frame_obj, NULL);
+        if (!_PyObject_IsUniquelyReferenced((PyObject *)f)) {
+            // Ownership transfer needs the live record to set f_back, but
+            // runs no Python code. Drop our reference only after the pop.
+            _PyFrame_TakeOwnership(f, frame, fp);
+            _PyThreadState_PopControl(tstate, frame);
+            Py_DECREF(f);
+            PyStackRef_CLOSE(executable);
+            _PyThreadState_PopDataFrame(tstate, fp);
+            return;
+        }
+        // This frame object dies here. Its deallocator does not dereference
+        // f_frame when it does not own the frame, so popping first is safe.
+        _PyThreadState_PopControl(tstate, frame);
+        Py_DECREF(f);
+    }
+    else {
+        _PyThreadState_PopControl(tstate, frame);
+    }
+    _PyStackRef *locals = fp->localsplus;
+    while (sp > locals) {
+        sp--;
+        PyStackRef_XCLOSE(*sp);
+    }
+    Py_CLEAR(fp->f_locals);
+    PyStackRef_CLEAR(fp->f_funcobj);
+    PyStackRef_CLOSE(executable);
+    _PyThreadState_PopDataFrame(tstate, fp);
 }
 
 static void
@@ -2091,15 +2139,22 @@ clear_gen_frame(PyThreadState *tstate, _PyControlRecord *frame,
     assert(tstate->exc_info == &gen->gi_exc_state);
     tstate->exc_info = gen->gi_exc_state.previous_item;
     gen->gi_exc_state.previous_item = NULL;
-    frame->state = CONTROL_DETACHED;
-    _PyThreadState_AdjustControlLimit(tstate, 1);
-    Py_BEGIN_CRITICAL_SECTION(gen);
     assert(fp->frame_obj == NULL || fp->frame_obj->f_frame == frame);
-    _PyFrame_ClearExceptCode(frame, fp);
-    Py_END_CRITICAL_SECTION();
+#ifndef Py_GIL_DISABLED
+    if (fp->frame_obj == NULL) {
+        _PyGen_PopFrameFinished(tstate, gen, frame, fp);
+    }
+    else
+#endif
+    {
+        // Preserve the saved record for frame objects and the free-threaded
+        // path. Detach it before clearing references can run finalizers.
+        _PyGen_PopFrame(tstate, gen, frame);
+        Py_BEGIN_CRITICAL_SECTION(gen);
+        _PyFrame_ClearExceptCode(&gen->gi_iframe, fp);
+        Py_END_CRITICAL_SECTION();
+    }
     _PyErr_ClearExcState(&gen->gi_exc_state);
-    _PyGen_PopFrame(tstate, gen, frame);
-    _PyThreadState_AdjustControlLimit(tstate, -1);
     // gh-143939: There must not be any escaping calls between setting
     // the generator return kind and returning from _PyEval_EvalFrame.
     ((_PyThreadStateImpl *)tstate)->generator_return_kind = GENERATOR_RETURN;
@@ -2120,6 +2175,48 @@ _PyEval_FrameClearAndPop(
     }
 }
 
+/* Create a generator without pushing a temporary frame or evaluating
+   RETURN_GENERATOR. Callers must check exact positional arguments and that
+   bypassing frame evaluation is allowed. The code starts with RETURN_GENERATOR.
+   Consumes callable, self_or_null and the arguments, including on failure. */
+PyObject *
+_PyEval_MakeGeneratorInPlace(PyThreadState *tstate, _PyStackRef callable,
+                             _PyStackRef self_or_null, _PyStackRef *args,
+                             int oparg)
+{
+    PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(callable);
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    assert(_PyCode_CODE(code)->op.code == RETURN_GENERATOR);
+    PyGenObject *gen = (PyGenObject *)_Py_MakeCoro(func);
+    if (gen == NULL) {
+        for (int i = oparg - 1; i >= 0; i--) {
+            PyStackRef_CLOSE(args[i]);
+        }
+        PyStackRef_XCLOSE(self_or_null);
+        PyStackRef_CLOSE(callable);
+        return NULL;
+    }
+    int has_self = !PyStackRef_IsNull(self_or_null);
+    _PyControlRecord *gen_frame = &gen->gi_iframe;
+    _PyInterpreterDataFrame *gen_data = &gen->gi_data;
+    // The generator outlives this call; borrowed stack references cannot escape.
+    _PyFrame_Initialize(tstate, gen_frame, gen_data,
+                        PyStackRef_MakeHeapSafe(callable), NULL, code,
+                        oparg + has_self);
+    gen_frame->instr_ptr++;
+    gen_frame->owner = FRAME_OWNED_BY_GENERATOR;
+    gen_frame->state = CONTROL_DETACHED;
+    _PyStackRef *first_non_self_local = gen_data->localsplus + has_self;
+    if (has_self) {
+        gen_data->localsplus[0] = PyStackRef_MakeHeapSafe(self_or_null);
+    }
+    for (int i = 0; i < oparg; i++) {
+        first_non_self_local[i] = PyStackRef_MakeHeapSafe(args[i]);
+    }
+    gen->gi_frame_state = FRAME_CREATED;
+    return (PyObject *)gen;
+}
+
 /* Consumes references to func, locals and all the args */
 _PyControlRecord *
 _PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
@@ -2135,15 +2232,25 @@ _PyEvalFramePushAndInit(PyThreadState *tstate, _PyStackRef func,
     }
     _PyInterpreterDataFrame *fp = frame->data;
     _PyFrame_Initialize(tstate, frame, fp, func, locals, code, 0);
-    _PyThreadState_AdjustControlLimit(tstate, 1);
-    int err = initialize_locals(tstate, func_obj, fp->localsplus, args, argcount, kwnames);
-    _PyThreadState_AdjustControlLimit(tstate, -1);
+    int err;
+    if (kwnames == NULL) {
+        // Binding positional arguments cannot call back into Python.
+        err = initialize_locals(tstate, func_obj, fp->localsplus, args, argcount, kwnames);
+    }
+    else {
+        // Keyword matching can call a str subclass's comparison method.
+        // Exclude this RESERVED slot from recursion depth during the callback.
+        _PyThreadState_AdjustControlLimit(tstate, 1);
+        err = initialize_locals(tstate, func_obj, fp->localsplus, args, argcount, kwnames);
+        _PyThreadState_AdjustControlLimit(tstate, -1);
+    }
     if (err) {
         assert(frame->owner == FRAME_OWNED_BY_THREAD);
         _PyThreadState_UpdateLastProfiledFrame(tstate, frame, tstate->current_frame);
         clear_thread_frame(tstate, frame, fp);
         return NULL;
     }
+    frame->state = CONTROL_ACTIVE;
     return frame;
 fail:
     /* Consume the references */
@@ -2235,9 +2342,78 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
                PyObject* const* args, size_t argcount,
                PyObject *kwnames)
 {
-    _PyControlRecord *entry = _PyThreadState_PushEntry(tstate);
+    PyCodeObject *code = (PyCodeObject *)func->func_code;
+    // Creating the generator here bypasses frame evaluation. Keep the normal
+    // path for eval-frame hooks and coroutine origin tracking.
+    if (kwnames == NULL && locals == NULL && argcount <= 8 &&
+        tstate->interp->eval_frame == NULL &&
+        argcount == (size_t)code->co_argcount &&
+        code->co_kwonlyargcount == 0 &&
+        (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0 &&
+        _PyCode_CODE(code)->op.code == RETURN_GENERATOR &&
+        !((code->co_flags & CO_COROUTINE) &&
+          tstate->coroutine_origin_tracking_depth != 0) &&
+        _PyThreadState_HasStackSpace(tstate, code->co_framesize))
+    {
+        /* The argument limit bounds this temporary reference array. */
+        _PyStackRef refs[8];
+        for (size_t i = 0; i < argcount; i++) {
+            refs[i] = PyStackRef_FromPyObjectNew(args[i]);
+        }
+        return _PyEval_MakeGeneratorInPlace(
+            tstate, PyStackRef_FromPyObjectNew(func), PyStackRef_NULL,
+            refs, (int)argcount);
+    }
+    int exact = kwnames == NULL && argcount == (size_t)code->co_argcount &&
+        code->co_kwonlyargcount == 0 &&
+        (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0;
+    _PyControlRecord *entry;
+    if (exact && _PyThreadState_HasStackSpace(tstate, code->co_framesize)) {
+        /* Reserve the entry, callee and data with the bounds check above.
+           Exact positional binding cannot call Python, so no callback can
+           observe the partially initialized records. */
+        CALL_STAT_INC(frames_pushed);
+        _PyThreadState_AdjustControlLimit(tstate, 1);
+        entry = _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
+        entry->owner = FRAME_OWNED_BY_INTERPRETER;
+        _PyControlRecord *frame = _PyThreadState_PushFrameUnchecked(
+            tstate, (int)code->co_framesize);
+        _PyInterpreterDataFrame *fp = frame->data;
+        Py_XINCREF(locals);
+        _PyFrame_Initialize(tstate, frame, fp, PyStackRef_FromPyObjectNew(func),
+                            locals, code, (int)argcount);
+        for (size_t i = 0; i < argcount; i++) {
+            fp->localsplus[i] = PyStackRef_FromPyObjectNew(args[i]);
+        }
+        EVAL_CALL_STAT_INC(EVAL_CALL_VECTOR);
+        PyObject *result = _PyEval_EvalFrame(tstate, frame, 0);
+        _PyThreadState_PopEntry(tstate, entry);
+        return result;
+    }
+    entry = _PyThreadState_PushEntry(tstate);
     if (entry == NULL) {
         return NULL;
+    }
+    if (exact) {
+        /* Exact positional call at a commit or chunk boundary. */
+        CALL_STAT_INC(frames_pushed);
+        _PyControlRecord *frame = _PyThreadState_PushFrame(tstate, code->co_framesize);
+        if (frame == NULL) {
+            _PyThreadState_PopEntry(tstate, entry);
+            return NULL;
+        }
+        _PyInterpreterDataFrame *fp = frame->data;
+        Py_XINCREF(locals);
+        _PyFrame_Initialize(tstate, frame, fp, PyStackRef_FromPyObjectNew(func),
+                            locals, code, (int)argcount);
+        for (size_t i = 0; i < argcount; i++) {
+            fp->localsplus[i] = PyStackRef_FromPyObjectNew(args[i]);
+        }
+        frame->state = CONTROL_ACTIVE;
+        EVAL_CALL_STAT_INC(EVAL_CALL_VECTOR);
+        PyObject *result = _PyEval_EvalFrame(tstate, frame, 0);
+        _PyThreadState_PopEntry(tstate, entry);
+        return result;
     }
     size_t total_args = argcount;
     if (kwnames) {

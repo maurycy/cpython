@@ -8999,10 +8999,8 @@
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             _PyFrame_SetStackPointer(frame, stack_pointer);
             _PyFrame_StackPointerValidate(frame);
-            _PyControlRecord *pushed_frame = _PyGen_PushFrameUnchecked(tstate, gen, value);
+            _PyControlRecord *pushed_frame = _PyGen_PushFrameChain(tstate, gen, value);
             _PyFrame_StackPointerInvalidate(frame);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
             assert( 2u + oparg <= UINT16_MAX);
             frame->return_offset = (uint16_t)( 2u + oparg);
             gen_frame = PyStackRef_Wrap(pushed_frame);
@@ -16258,10 +16256,8 @@
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             _PyFrame_SetStackPointer(frame, stack_pointer);
             _PyFrame_StackPointerValidate(frame);
-            _PyControlRecord *pushed_frame = _PyGen_PushFrameUnchecked(tstate, gen, PyStackRef_None);
+            _PyControlRecord *pushed_frame = _PyGen_PushFrameChain(tstate, gen, PyStackRef_None);
             _PyFrame_StackPointerInvalidate(frame);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
             frame->return_offset = (uint16_t)( 2u + oparg);
             gen_frame = PyStackRef_Wrap(pushed_frame);
             _tos_cache2 = gen_frame;
@@ -17495,9 +17491,9 @@
             _PyControlRecord *temp = PyStackRef_Unwrap(new_frame);
             _PyFrame_SetStackPointer(frame, stack_pointer);
             _PyFrame_StackPointerValidate(frame);
-            assert(_PyFrame_GetCaller(temp) == frame || _PyFrame_GetCaller(_PyFrame_GetCaller(temp)) == frame);
+            assert(temp > frame);
             CALL_STAT_INC(inlined_py_calls);
-            temp->state = CONTROL_ACTIVE;
+            assert(temp->state == CONTROL_ACTIVE);
             frame = tstate->current_frame = temp;
             fp = frame->data;
             stack_pointer = _PyFrame_GetStackPointer(frame);
@@ -17509,6 +17505,47 @@
             DTRACE_FUNCTION_ENTRY();
             LLTRACE_RESUME_FRAME();
             SET_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            break;
+        }
+
+        case _INIT_CALL_PY_GEN_EXACT_ARGS_r01: {
+            CHECK_CURRENT_CACHED_VALUES(0);
+            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
+            _PyStackRef *args;
+            _PyStackRef self_or_null;
+            _PyStackRef callable;
+            _PyStackRef res;
+            oparg = CURRENT_OPARG();
+            args = &stack_pointer[-oparg];
+            self_or_null = stack_pointer[-1 - oparg];
+            callable = stack_pointer[-2 - oparg];
+            PyFunctionObject *func = (PyFunctionObject *)PyStackRef_AsPyObjectBorrow(callable);
+            PyCodeObject *code = (PyCodeObject *)func->func_code;
+            if ((code->co_flags & CO_COROUTINE) &&
+                     tstate->coroutine_origin_tracking_depth != 0) {
+                UOP_STAT_INC(uopcode, miss);
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_JUMP_TARGET();
+            }
+            STAT_INC(CALL, hit);
+            _PyFrame_SetStackPointer(frame, stack_pointer);
+            _PyFrame_StackPointerValidate(frame);
+            PyObject *gen = _PyEval_MakeGeneratorInPlace(tstate, callable, self_or_null, args, oparg);
+            _PyFrame_StackPointerInvalidate(frame);
+            if (gen == NULL) {
+                stack_pointer += -2 - oparg;
+                ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+                SET_CURRENT_CACHED_VALUES(0);
+                JUMP_TO_ERROR();
+            }
+            res = PyStackRef_FromPyObjectStealMortal(gen);
+            _tos_cache0 = res;
+            _tos_cache1 = PyStackRef_ZERO_BITS;
+            _tos_cache2 = PyStackRef_ZERO_BITS;
+            SET_CURRENT_CACHED_VALUES(1);
+            stack_pointer += -2 - oparg;
+            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
             break;
         }
@@ -18243,13 +18280,26 @@
             assert(_PyFrame_GetBytecode(shim)[0].op.code == EXIT_INIT_CHECK);
             assert(_PyFrame_GetBytecode(shim)[1].op.code == RETURN_VALUE);
             shim->data->localsplus[0] = PyStackRef_DUP(self);
-            _PyThreadState_AdjustControlLimit(tstate, 1);
-            assert(stack_pointer == _PyFrame_GetStackPointer(frame));
-            _PyFrame_StackPointerValidate(frame);
-            _PyControlRecord *temp = _PyEvalFramePushAndInit(
-                tstate, init, NULL, args-1, oparg+1, NULL);
-            _PyFrame_StackPointerInvalidate(frame);
-            _PyThreadState_AdjustControlLimit(tstate, -1);
+            PyCodeObject *init_code = (PyCodeObject *)((PyFunctionObject *)PyStackRef_AsPyObjectBorrow(init))->func_code;
+            _PyControlRecord *temp;
+            if (init_code->co_argcount == oparg + 1 &&
+                init_code->co_kwonlyargcount == 0 &&
+                (init_code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0)
+            {
+                temp = _PyFrame_PushUnchecked(tstate, init, oparg + 1);
+                _PyStackRef *locals = temp->data->localsplus;
+                locals[0] = self;
+                for (int i = 0; i < oparg; i++) {
+                    locals[1 + i] = args[i];
+                }
+            }
+            else {
+                assert(stack_pointer == _PyFrame_GetStackPointer(frame));
+                _PyFrame_StackPointerValidate(frame);
+                temp = _PyEvalFramePushAndInit(
+                    tstate, init, NULL, args-1, oparg+1, NULL);
+                _PyFrame_StackPointerInvalidate(frame);
+            }
             stack_pointer += -2 - oparg;
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             if (temp == NULL) {
@@ -20597,8 +20647,9 @@
             gen_frame->owner = FRAME_OWNED_BY_GENERATOR;
             _PyControlRecord *prev = _PyFrame_GetCaller(frame);
             _PyThreadState_UpdateLastProfiledFrame(tstate, frame, prev);
+            tstate->current_frame = prev;
             _PyThreadState_PopFrame(tstate, frame, fp);
-            frame = tstate->current_frame = prev;
+            frame = prev;
             fp = frame->data;
             LOAD_IP(frame->return_offset);
             stack_pointer = _PyFrame_GetStackPointer(frame);

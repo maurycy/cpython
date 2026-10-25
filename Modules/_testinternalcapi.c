@@ -22,6 +22,7 @@
 #include "pycore_fileutils.h"     // _Py_normpath()
 #include "pycore_flowgraph.h"     // _PyCompile_OptimizeCfg()
 #include "pycore_frame.h"         // _PyControlRecord
+#include "pycore_genobject.h"     // _PyGen_GetGeneratorFromFrame()
 #include "pycore_function.h"      // _PyFunction_GET_BUILTINS
 #include "pycore_gc.h"            // PyGC_Head
 #include "pycore_hashtable.h"     // _Py_hashtable_new()
@@ -185,6 +186,68 @@ get_recursion_depth(PyObject *self, PyObject *Py_UNUSED(args))
     return PyLong_FromLong(_PyThreadState_GetRecursionDepth(tstate));
 }
 
+
+static PyObject*
+check_control_stack(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+    static char *kwlist[] = {"strict", "window", NULL};
+    int strict = 0, window = 0;
+    if (!PyArg_ParseTupleAndKeywords(args, kwargs, "|pp:check_control_stack",
+                                     kwlist, &strict, &window)) {
+        return NULL;
+    }
+    PyThreadState *tstate = _PyThreadState_GET();
+    int flags = (strict ? _PY_CONTROLSTACK_CHECK_STRICT : 0)
+              | (window ? _PY_CONTROLSTACK_CHECK_WINDOW : 0);
+    char buf[512];
+    if (_PyThreadState_CheckControlStack(tstate, flags, buf, sizeof(buf)) < 0) {
+        PyErr_SetString(PyExc_RuntimeError, buf);
+        return NULL;
+    }
+    return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:i}",
+        "records", (Py_ssize_t)(tstate->controlstack_top - tstate->base_frame),
+        "extra", tstate->controlstack_extra,
+        "limit", (Py_ssize_t)(tstate->controlstack_limit - tstate->base_frame),
+        "committed", (Py_ssize_t)(tstate->controlstack_end - tstate->base_frame),
+        "depth", _PyThreadState_GetRecursionDepth(tstate),
+        "record_size", (int)sizeof(_PyControlRecord));
+}
+
+static PyObject*
+control_stack_dump(PyObject *self, PyObject *Py_UNUSED(args))
+{
+    PyThreadState *tstate = _PyThreadState_GET();
+    PyObject *result = PyList_New(0);
+    if (result == NULL) {
+        return NULL;
+    }
+    _PyControlRecord *base = tstate->base_frame;
+    for (_PyControlRecord *r = base; r < tstate->controlstack_top; r++) {
+        PyObject *name = Py_None;
+        int gen_state = -1;
+        if (r->owner == FRAME_OWNED_BY_THREAD || r->owner == FRAME_OWNED_BY_GENERATOR) {
+            if (!PyStackRef_IsNull(r->f_executable)) {
+                PyObject *ex = PyStackRef_AsPyObjectBorrow(r->f_executable);
+                if (ex != NULL && PyCode_Check(ex)) {
+                    name = ((PyCodeObject *)ex)->co_qualname;
+                }
+            }
+            if (r->owner == FRAME_OWNED_BY_GENERATOR && r->data != NULL) {
+                gen_state = _PyGen_GetGeneratorFromFrame(r->data)->gi_frame_state;
+            }
+        }
+        PyObject *item = Py_BuildValue("(niiOiO)",
+            (Py_ssize_t)(r - base), (int)r->state, (int)r->owner, name, gen_state,
+            r == tstate->current_frame ? Py_True : Py_False);
+        if (item == NULL || PyList_Append(result, item) < 0) {
+            Py_XDECREF(item);
+            Py_DECREF(result);
+            return NULL;
+        }
+        Py_DECREF(item);
+    }
+    return result;
+}
 
 static PyObject*
 get_c_recursion_remaining(PyObject *self, PyObject *Py_UNUSED(args))
@@ -3342,6 +3405,8 @@ static PyMethodDef module_functions[] = {
     {"get_configs", get_configs, METH_NOARGS},
     {"get_eval_frame_stats", get_eval_frame_stats, METH_NOARGS, NULL},
     {"get_recursion_depth", get_recursion_depth, METH_NOARGS},
+    {"check_control_stack", _PyCFunction_CAST(check_control_stack), METH_VARARGS | METH_KEYWORDS},
+    {"control_stack_dump", control_stack_dump, METH_NOARGS},
     {"get_c_recursion_remaining", get_c_recursion_remaining, METH_NOARGS},
     {"get_stack_pointer", get_stack_pointer, METH_NOARGS},
     {"get_stack_margin", get_stack_margin, METH_NOARGS},

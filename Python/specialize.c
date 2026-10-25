@@ -1785,6 +1785,9 @@ specialize_py_call(PyFunctionObject *func, _Py_CODEUNIT *instr, int nargs,
     if (argcount == nargs + bound_method) {
         opcode =
             bound_method ? CALL_BOUND_METHOD_EXACT_ARGS : CALL_PY_EXACT_ARGS;
+        if (!bound_method && _PyCode_CODE(code)->op.code == RETURN_GENERATOR) {
+            opcode = CALL_PY_GEN_EXACT_ARGS;
+        }
     }
     else {
         opcode = bound_method ? CALL_BOUND_METHOD_GENERAL : CALL_PY_GENERAL;

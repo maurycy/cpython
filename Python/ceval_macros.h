@@ -224,7 +224,7 @@ do { \
         assert(!IS_PEP523_HOOKED(tstate));                       \
         _PyFrame_SetStackPointer(frame, stack_pointer);          \
         _PyFrame_StackPointerValidate(frame);                    \
-        assert(_PyFrame_GetPrevious(NEW_FRAME) == frame);                  \
+        assert((NEW_FRAME) > frame);                                      \
         frame = tstate->current_frame = (NEW_FRAME);             \
         frame->state = CONTROL_ACTIVE;                          \
         fp = frame->data;                                       \
@@ -586,6 +586,75 @@ gen_try_set_executing(PyGenObject *gen)
         return true;
     }
     return false;
+}
+
+/* Resume gen with value, following yield-from/await delegation when the
+   bytecode and resume checks allow it. This skips dispatch through
+   RESUME_CHECK, JUMP_BACKWARD_NO_INTERRUPT and SEND_GEN for outer levels.
+   Each level still gets its own record and exception-state link. Return
+   the innermost record for the interpreter to run; a failed guard leaves
+   that level on the normal resume path. */
+static inline _PyControlRecord *
+_PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value)
+{
+    assert(gen->gi_live_frame == &gen->gi_iframe);
+    _PyControlRecord *first = _PyThreadState_ReserveControlUnchecked(tstate);
+    _PyControlRecord *frame = first;
+    gen->gi_exc_state.previous_item = tstate->exc_info;
+    tstate->exc_info = &gen->gi_exc_state;
+    _Py_CODEUNIT *skip = NULL;
+    for (;;) {
+        _PyControlRecord *saved = &gen->gi_iframe;
+        _Py_CODEUNIT *ip = saved->instr_ptr;
+        if (ip[0].op.code != RESUME_CHECK) {
+            break;
+        }
+        int next = ip[2].op.code;
+        if (next == POP_TOP) {
+            if (PyStackRef_IsNone(value) && _PyGen_ResumeCheckPasses(tstate, saved)) {
+                skip = ip + 3;
+            }
+            break;
+        }
+        if (next != JUMP_BACKWARD_NO_INTERRUPT ||
+            ip[-1].op.code != YIELD_VALUE || ip[-1].op.arg != 1) {
+            break;
+        }
+        _Py_CODEUNIT *send = ip + 3 - ip[2].op.arg;
+        if (send->op.code != SEND_GEN ||
+            !_PyThreadState_HasControlSpace(tstate, 1) ||
+            !_PyGen_ResumeCheckPasses(tstate, saved)) {
+            break;
+        }
+        PyObject *receiver = PyStackRef_AsPyObjectBorrow(saved->stackpointer[-2]);
+        if (Py_TYPE(receiver) != &PyGen_Type && Py_TYPE(receiver) != &PyCoro_Type) {
+            break;
+        }
+        PyGenObject *inner = (PyGenObject *)receiver;
+        if (!gen_try_set_executing(inner)) {
+            break;
+        }
+        _PyGen_LinkFrame(gen, frame, NULL, send, CONTROL_RESERVED);
+        frame->return_offset = (uint16_t)(1 + INLINE_CACHE_ENTRIES_SEND + send->op.arg);
+        inner->gi_exc_state.previous_item = tstate->exc_info;
+        tstate->exc_info = &inner->gi_exc_state;
+        frame = _PyThreadState_ReserveControlUnchecked(tstate);
+        gen = inner;
+    }
+    int state = frame == first ? CONTROL_ACTIVE : CONTROL_RESERVED;
+    if (skip != NULL) {
+        _PyGen_LinkFrame(gen, frame, NULL, skip, state);
+    }
+    else {
+        _PyGen_LinkFrame(gen, frame, &value, NULL, state);
+    }
+    if (frame != first) {
+        // Keep intermediate records RESERVED until the whole chain is built.
+        for (_PyControlRecord *r = first; r <= frame; r++) {
+            r->state = CONTROL_ACTIVE;
+        }
+    }
+    return frame;
 }
 
 // Macro for inplace float binary ops (tier 2 only).

@@ -10,6 +10,7 @@
 #include "pycore_critical_section.h" // _PyCriticalSection_Resume()
 #include "pycore_dtoa.h"          // _dtoa_state_INIT()
 #include "pycore_freelist.h"      // _PyObject_ClearFreeLists()
+#include "pycore_genobject.h"     // _PyGen_GetGeneratorFromFrame()
 #include "pycore_initconfig.h"    // _PyStatus_OK()
 #include "pycore_interpframe.h"   // _PyThreadState_HasStackSpace()
 #include "pycore_object.h"        // _Py_ClearImmortal()
@@ -398,6 +399,8 @@ _PyRuntimeState_Fini(_PyRuntimeState *runtime)
     gilstate_clear();
 }
 
+static void free_controlstack_cache(PyInterpreterState *interp);
+
 #ifdef HAVE_FORK
 /* This function is called from PyOS_AfterFork_Child to ensure that
    newly created child processes do not share locks with the parent. */
@@ -425,6 +428,13 @@ _PyRuntimeState_ReInitThreads(_PyRuntimeState *runtime)
         }
     }
 #endif
+
+    for (PyInterpreterState *interp = runtime->interpreters.head;
+         interp != NULL; interp = interp->next)
+    {
+        _PyMutex_at_fork_reinit(&interp->threads.controlstack_cache_lock);
+        free_controlstack_cache(interp);
+    }
 
     _PyThread_AfterFork(&runtime->threads);
 
@@ -472,6 +482,7 @@ alloc_interpreter(void)
 static void
 free_interpreter(PyInterpreterState *interp)
 {
+    free_controlstack_cache(interp);
 #ifdef Py_STATS
     if (interp->pystats_struct) {
         PyMem_RawFree(interp->pystats_struct);
@@ -1508,10 +1519,88 @@ commit_control_stack(PyThreadState *tstate, size_t size)
     return 0;
 }
 
+/* Keep committed pages so reuse does not need to commit them again. Release
+   stacks above this cap rather than retaining an unusually deep allocation. */
+#define CONTROLSTACK_CACHE_MAX_COMMITTED (1 << 20)
+
+static int
+take_cached_control_stack(PyThreadState *tstate)
+{
+    struct pythreads *threads = &tstate->interp->threads;
+    PyMutex_Lock(&threads->controlstack_cache_lock);
+    int n = threads->controlstack_cache_count;
+    if (n == 0) {
+        PyMutex_Unlock(&threads->controlstack_cache_lock);
+        return 0;
+    }
+    n--;
+    tstate->base_frame = threads->controlstack_cache[n].base;
+    tstate->controlstack_size = threads->controlstack_cache[n].size;
+    tstate->controlstack_end = tstate->base_frame +
+        threads->controlstack_cache[n].committed / sizeof(_PyControlRecord);
+    threads->controlstack_cache_count = n;
+    PyMutex_Unlock(&threads->controlstack_cache_lock);
+    return 1;
+}
+
+static int
+cache_control_stack(PyThreadState *tstate)
+{
+    size_t committed = (char *)tstate->controlstack_end - (char *)tstate->base_frame;
+    if (committed > CONTROLSTACK_CACHE_MAX_COMMITTED || tstate->interp == NULL) {
+        return 0;
+    }
+    struct pythreads *threads = &tstate->interp->threads;
+    PyMutex_Lock(&threads->controlstack_cache_lock);
+    int n = threads->controlstack_cache_count;
+    if (n == (int)Py_ARRAY_LENGTH(threads->controlstack_cache)) {
+        PyMutex_Unlock(&threads->controlstack_cache_lock);
+        return 0;
+    }
+#ifdef Py_DEBUG
+    memset(tstate->base_frame, 0xCB, committed);
+#endif
+    threads->controlstack_cache[n].base = tstate->base_frame;
+    threads->controlstack_cache[n].size = tstate->controlstack_size;
+    threads->controlstack_cache[n].committed = committed;
+    threads->controlstack_cache_count = n + 1;
+    PyMutex_Unlock(&threads->controlstack_cache_lock);
+    return 1;
+}
+
+static void
+release_control_stack(struct _PyControlRecord *base, size_t size)
+{
+#ifdef MS_WINDOWS
+    VirtualFree(base, 0, MEM_RELEASE);
+#elif defined(MAP_ANONYMOUS)
+    munmap(base, size);
+#else
+    PyMem_RawFree(base);
+#endif
+}
+
+static void
+free_controlstack_cache(PyInterpreterState *interp)
+{
+    struct pythreads *threads = &interp->threads;
+    for (int i = 0; i < threads->controlstack_cache_count; i++) {
+        release_control_stack(threads->controlstack_cache[i].base,
+                              threads->controlstack_cache[i].size);
+    }
+    threads->controlstack_cache_count = 0;
+}
+
 static int
 allocate_control_stack(PyThreadState *tstate)
 {
-    size_t size = SIZEOF_VOID_P > 4 ? (size_t)1 << 30 : (size_t)1 << 24;
+#ifndef _PY_CONTROLSTACK_RESERVE_SHIFT
+#define _PY_CONTROLSTACK_RESERVE_SHIFT 26
+#endif
+    if (take_cached_control_stack(tstate)) {
+        return 0;
+    }
+    size_t size = SIZEOF_VOID_P > 4 ? (size_t)1 << _PY_CONTROLSTACK_RESERVE_SHIFT : (size_t)1 << 24;
     void *base;
 #ifdef MS_WINDOWS
     base = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
@@ -1538,13 +1627,10 @@ free_control_stack(PyThreadState *tstate)
     if (tstate->base_frame == NULL) {
         return;
     }
-#ifdef MS_WINDOWS
-    VirtualFree(tstate->base_frame, 0, MEM_RELEASE);
-#elif defined(MAP_ANONYMOUS)
-    munmap(tstate->base_frame, tstate->controlstack_size);
-#else
-    PyMem_RawFree(tstate->base_frame);
-#endif
+    if (!cache_control_stack(tstate)) {
+        release_control_stack(tstate->base_frame, tstate->controlstack_size);
+    }
+    tstate->base_frame = NULL;
 }
 
 static void
@@ -1829,8 +1915,10 @@ clear_datastack(PyThreadState *tstate)
     }
     chunk = tstate->datastack_cached_chunk;
     tstate->datastack_cached_chunk = NULL;
-    if (chunk != NULL) {
+    while (chunk != NULL) {
+        _PyStackChunk *prev = chunk->previous;
         _PyObject_VirtualFree(chunk, chunk->size);
+        chunk = prev;
     }
 }
 
@@ -3273,7 +3361,7 @@ push_chunk(PyThreadState *tstate, int size)
         && (size_t)allocate_size <= tstate->datastack_cached_chunk->size)
     {
         new = tstate->datastack_cached_chunk;
-        tstate->datastack_cached_chunk = NULL;
+        tstate->datastack_cached_chunk = new->previous;
         new->previous = tstate->datastack_chunk;
         new->top = 0;
     }
@@ -3305,17 +3393,28 @@ pop_data_stack(PyThreadState *tstate, _PyStackRef *slots)
     if (base == &tstate->datastack_chunk->data[0]) {
         _PyStackChunk *chunk = tstate->datastack_chunk;
         _PyStackChunk *previous = chunk->previous;
-        _PyStackChunk *cached = tstate->datastack_cached_chunk;
         // push_chunk ensures that the root chunk is never popped:
         assert(previous);
         tstate->datastack_top = &previous->data[previous->top];
         tstate->datastack_chunk = previous;
         tstate->datastack_limit = (PyObject **)(((char *)previous) + previous->size);
-        chunk->previous = NULL;
-        if (cached != NULL) {
-            _PyObject_VirtualFree(cached, cached->size);
-        }
+        // Reuse previous to link freed chunks. Keeping a bounded cache avoids
+        // mapping and unmapping them on each repeated deep descent.
+        chunk->previous = tstate->datastack_cached_chunk;
         tstate->datastack_cached_chunk = chunk;
+        int kept = 1;
+        _PyStackChunk *last = chunk;
+        while (last->previous != NULL && kept < _PY_DATA_STACK_CACHED_CHUNKS) {
+            last = last->previous;
+            kept++;
+        }
+        _PyStackChunk *extra = last->previous;
+        last->previous = NULL;
+        while (extra != NULL) {
+            _PyStackChunk *next = extra->previous;
+            _PyObject_VirtualFree(extra, extra->size);
+            extra = next;
+        }
     }
     else {
         assert(tstate->datastack_top);
@@ -3337,16 +3436,13 @@ _PyThreadState_PushControlSlow(PyThreadState *tstate)
         return NULL;
     }
     _PyThreadState_UpdateControlLimit(tstate);
-    return _PyThreadState_PushControlUnchecked(tstate);
+    return _PyThreadState_PushControlUnchecked(tstate, CONTROL_RESERVED);
 }
 
 _PyControlRecord *
 _PyThreadState_PushFrame(PyThreadState *tstate, size_t size)
 {
     assert(size < INT_MAX / sizeof(PyObject *));
-    if (_PyThreadState_HasStackSpace(tstate, (int)size)) {
-        return _PyThreadState_PushFrameUnchecked(tstate, (int)size);
-    }
     _PyControlRecord *frame = _PyThreadState_PushControl(tstate);
     if (frame == NULL) {
         return NULL;
@@ -3377,6 +3473,270 @@ _PyThreadState_PopFrame(PyThreadState *tstate, _PyControlRecord *frame,
     pop_data_stack(tstate, (_PyStackRef *)fp);
     _PyThreadState_PopControl(tstate, frame);
 }
+
+void
+_PyThreadState_PopDataFrame(PyThreadState *tstate, _PyInterpreterDataFrame *fp)
+{
+    pop_data_stack(tstate, (_PyStackRef *)fp);
+}
+
+
+/* ---- Control stack verifier -------------------------------------------
+ *
+ * Invariants checked (see Tools/dualstack/README.md):
+ *  H1 base_frame < controlstack_top <= controlstack_end <= reservation end
+ *  H2 limit == base + min(capacity, 1 + recursion_limit + extra [+ 50])
+ *  H3 extra >= 0
+ *  B1 slot 0 is CONTROL_BASE, owner INTERPRETER, data == &base_data
+ *  C1 current_frame in [base, top) and ACTIVE (or BASE when idle)
+ *  C2 no ACTIVE record above current_frame
+ *  R1 no CONTROL_BASE above slot 0; DETACHED only for a dying generator
+ *  R2 owner is THREAD / GENERATOR / INTERPRETER / FRAME_OBJECT
+ *  T1 thread-owned data lies in a data stack chunk
+ *  T2 topmost thread-owned data is below datastack_top, in the current chunk
+ *     or its predecessor (the data can outlive a popped control record)
+ *  G1 gen->gi_live_frame == record, gi_iframe stays DETACHED, gi_iframe.data == &gi_data
+ *  G2 gi_frame_state is EXECUTING while linked (CLEARED when DETACHED)
+ *  E1 ACTIVE entry records point their data into this thread's C stack
+ *  F1 data->frame_obj->f_frame == record when a frame object exists
+ *  S1 (debug) stackpointer within [localsplus, localsplus + nlocalsplus + stacksize]
+ *  X1 extra >= number of entry records; == in STRICT mode
+ *  P1 (debug) slots above top are not ACTIVE/RESERVED
+ */
+
+#define CS_FAIL(...) \
+    do { PyOS_snprintf(buf, buflen, __VA_ARGS__); return -1; } while (0)
+
+static int
+data_in_datastack(PyThreadState *tstate, const void *p, _PyStackChunk **which)
+{
+    for (_PyStackChunk *c = tstate->datastack_chunk; c != NULL; c = c->previous) {
+        const char *lo = (const char *)c->data;
+        const char *hi = (const char *)c + c->size;
+        if ((const char *)p >= lo && (const char *)p < hi) {
+            if (which) {
+                *which = c;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int
+_PyThreadState_CheckControlStack(PyThreadState *tstate, int flags,
+                                 char *buf, size_t buflen)
+{
+    _PyThreadStateImpl *ts = (_PyThreadStateImpl *)tstate;
+    _PyControlRecord *base = tstate->base_frame;
+    _PyControlRecord *top = tstate->controlstack_top;
+    _PyControlRecord *limit = tstate->controlstack_limit;
+    _PyControlRecord *end = tstate->controlstack_end;
+    int window = flags & _PY_CONTROLSTACK_CHECK_WINDOW;
+
+    if (base == NULL) {
+        CS_FAIL("H1: base_frame is NULL");
+    }
+    if (top <= base) {
+        CS_FAIL("H1: controlstack_top %p not above base_frame %p", (void *)top, (void *)base);
+    }
+    if (top > end) {
+        CS_FAIL("H1: controlstack_top %p above committed end %p", (void *)top, (void *)end);
+    }
+    if ((char *)end > (char *)base + tstate->controlstack_size) {
+        CS_FAIL("H1: committed end %p beyond reservation of %zu bytes", (void *)end, tstate->controlstack_size);
+    }
+    if (tstate->controlstack_extra < 0) {
+        CS_FAIL("H3: controlstack_extra is %zd", tstate->controlstack_extra);
+    }
+    if (limit <= base || limit > end) {
+        CS_FAIL("H2: limit index %zd out of (0, %zd]", (Py_ssize_t)(limit - base), (Py_ssize_t)(end - base));
+    }
+    {
+        Py_ssize_t capacity = end - base;
+        Py_ssize_t expect = 1 + (Py_ssize_t)tstate->py_recursion_limit + tstate->controlstack_extra;
+        Py_ssize_t have = limit - base;
+        if (have != Py_MIN(capacity, expect) && have != Py_MIN(capacity, expect + 50)) {
+            CS_FAIL("H2: limit index %zd, expected %zd or %zd (recursion_limit=%d extra=%zd headroom=%d capacity=%zd)",
+                    have, Py_MIN(capacity, expect), Py_MIN(capacity, expect + 50),
+                    tstate->py_recursion_limit, tstate->controlstack_extra,
+                    tstate->recursion_headroom, capacity);
+        }
+    }
+    if (base->state != CONTROL_BASE) {
+        CS_FAIL("B1: slot 0 state is %d, not CONTROL_BASE", (int)base->state);
+    }
+    if (base->owner != FRAME_OWNED_BY_INTERPRETER) {
+        CS_FAIL("B1: slot 0 owner is %d", (int)base->owner);
+    }
+    if (base->data != &ts->base_data) {
+        CS_FAIL("B1: slot 0 data %p is not &base_data %p", (void *)base->data, (void *)&ts->base_data);
+    }
+
+    _PyControlRecord *cur = tstate->current_frame;
+    if (cur < base || cur >= top) {
+        CS_FAIL("C1: current_frame %p outside [base %p, top %p)", (void *)cur, (void *)base, (void *)top);
+    }
+    if (cur->state != CONTROL_ACTIVE && cur->state != CONTROL_BASE) {
+        CS_FAIL("C1: current_frame (slot %zd) state is %d", (Py_ssize_t)(cur - base), (int)cur->state);
+    }
+
+    Py_ssize_t n = top - base;
+    Py_ssize_t lo = 1;
+    if (window && n > 9) {
+        lo = n - 8;
+    }
+    uintptr_t sp_here = _Py_get_machine_stack_pointer();
+    Py_ssize_t n_entries = 0;
+    _PyControlRecord *top_thread = NULL;
+
+    for (Py_ssize_t i = lo; i < n; i++) {
+        _PyControlRecord *r = base + i;
+        int st = r->state;
+        int ow = r->owner;
+        if (st == CONTROL_BASE) {
+            CS_FAIL("R1: slot %zd has CONTROL_BASE state", i);
+        }
+        if (st == CONTROL_DETACHED && ow != FRAME_OWNED_BY_GENERATOR) {
+            CS_FAIL("R1: slot %zd is DETACHED with owner %d", i, ow);
+        }
+        if (r > cur && st == CONTROL_ACTIVE) {
+            CS_FAIL("C2: slot %zd is ACTIVE above current_frame (slot %zd)", i, (Py_ssize_t)(cur - base));
+        }
+        switch (ow) {
+        case FRAME_OWNED_BY_THREAD:
+            if (r->data == NULL || !data_in_datastack(tstate, r->data, NULL)) {
+                CS_FAIL("T1: slot %zd (thread, state %d) data %p not in any data stack chunk", i, st, (void *)r->data);
+            }
+            top_thread = r;
+            break;
+        case FRAME_OWNED_BY_GENERATOR: {
+            if (r->data == NULL) {
+                CS_FAIL("G1: slot %zd (generator) has NULL data", i);
+            }
+            PyGenObject *gen = _PyGen_GetGeneratorFromFrame(r->data);
+            if (gen->gi_live_frame != r) {
+                CS_FAIL("G1: slot %zd generator %p gi_live_frame is %p", i, (void *)gen, (void *)gen->gi_live_frame);
+            }
+            if (gen->gi_iframe.state != CONTROL_DETACHED) {
+                CS_FAIL("G1: slot %zd generator %p saved gi_iframe state is %d", i, (void *)gen, (int)gen->gi_iframe.state);
+            }
+            if (gen->gi_iframe.data != &gen->gi_data) {
+                CS_FAIL("G1: slot %zd generator %p gi_iframe.data is %p", i, (void *)gen, (void *)gen->gi_iframe.data);
+            }
+            int fs = gen->gi_frame_state;
+            if (st == CONTROL_DETACHED ? fs != FRAME_CLEARED : fs != FRAME_EXECUTING) {
+                CS_FAIL("G2: slot %zd generator %p state %d but gi_frame_state %d", i, (void *)gen, st, fs);
+            }
+            break;
+        }
+        case FRAME_OWNED_BY_INTERPRETER:
+            n_entries++;
+            if (st == CONTROL_ACTIVE && ts->c_stack_top != 0 && sp_here < ts->c_stack_top) {
+                uintptr_t d = (uintptr_t)r->data;
+                if (d <= sp_here || d > ts->c_stack_top) {
+                    CS_FAIL("E1: slot %zd entry data %p not in C stack (%p, %p]", i, (void *)d, (void *)sp_here, (void *)ts->c_stack_top);
+                }
+            }
+            break;
+        case FRAME_OWNED_BY_FRAME_OBJECT:
+            break;
+        default:
+            CS_FAIL("R2: slot %zd has owner %d (state %d)", i, ow, st);
+        }
+        if (ow == FRAME_OWNED_BY_THREAD || ow == FRAME_OWNED_BY_GENERATOR) {
+            PyFrameObject *fo = r->data->frame_obj;
+            if (fo != NULL && fo->f_frame != r) {
+                CS_FAIL("F1: slot %zd frame object %p has f_frame %p", i, (void *)fo, (void *)fo->f_frame);
+            }
+#ifdef Py_DEBUG
+            if (r->stackpointer_valid && st != CONTROL_DETACHED) {
+                _PyStackRef *lp = r->data->localsplus;
+                if (r->stackpointer < lp) {
+                    CS_FAIL("S1: slot %zd stackpointer %p below localsplus %p", i, (void *)r->stackpointer, (void *)lp);
+                }
+                if (!PyStackRef_IsNull(r->f_executable)) {
+                    PyObject *ex = PyStackRef_AsPyObjectBorrow(r->f_executable);
+                    if (ex != NULL && PyCode_Check(ex)) {
+                        PyCodeObject *co = (PyCodeObject *)ex;
+                        _PyStackRef *hi = lp + co->co_nlocalsplus + co->co_stacksize;
+                        if (r->stackpointer > hi) {
+                            CS_FAIL("S1: slot %zd stackpointer %p above limit %p", i, (void *)r->stackpointer, (void *)hi);
+                        }
+                    }
+                }
+            }
+#endif
+        }
+    }
+
+    if (top_thread != NULL) {
+        _PyStackChunk *chunk = NULL;
+        (void)data_in_datastack(tstate, top_thread->data, &chunk);
+        if ((PyObject **)top_thread->data >= tstate->datastack_top) {
+            CS_FAIL("T2: topmost thread data %p not below datastack_top %p", (void *)top_thread->data, (void *)tstate->datastack_top);
+        }
+        _PyStackChunk *current = tstate->datastack_chunk;
+        if (chunk != current && (current == NULL || chunk != current->previous)) {
+            CS_FAIL("T2: topmost thread data %p in chunk %p, current chunk %p", (void *)top_thread->data, (void *)chunk, (void *)current);
+        }
+    }
+
+    if (!window) {
+        if (tstate->controlstack_extra < n_entries) {
+            CS_FAIL("X1: controlstack_extra %zd below %zd entry records", tstate->controlstack_extra, n_entries);
+        }
+        if ((flags & _PY_CONTROLSTACK_CHECK_STRICT) && tstate->controlstack_extra != n_entries) {
+            CS_FAIL("X1: controlstack_extra %zd, %zd entry records", tstate->controlstack_extra, n_entries);
+        }
+    }
+    if ((flags & _PY_CONTROLSTACK_CHECK_IDLE) && n == 1 && tstate->controlstack_extra != 0) {
+        CS_FAIL("X1: controlstack_extra %zd on an empty control stack", tstate->controlstack_extra);
+    }
+
+#ifdef Py_DEBUG
+    for (_PyControlRecord *r = top; r < end && r < top + 8; r++) {
+        if (r->state == CONTROL_ACTIVE || r->state == CONTROL_RESERVED) {
+            CS_FAIL("P1: slot %zd above top has state %d", (Py_ssize_t)(r - base), (int)r->state);
+        }
+    }
+#endif
+    return 0;
+}
+
+#undef CS_FAIL
+
+#ifdef Py_DEBUG
+void
+_PyThreadState_ControlStackHook(PyThreadState *tstate, const char *where)
+{
+    // Read the debug-only setting once, rather than on every push and pop.
+    static int mode = -1;
+    if (mode < 0) {
+        const char *env = getenv("PYTHON_CONTROLSTACK_CHECK");
+        if (env == NULL || *env == '\0' || strcmp(env, "window") == 0) {
+            mode = 1;
+        }
+        else if (strcmp(env, "full") == 0) {
+            mode = 2;
+        }
+        else {
+            mode = 0;
+        }
+    }
+    if (mode == 0) {
+        return;
+    }
+    char buf[512];
+    int flags = mode == 2 ? 0 : _PY_CONTROLSTACK_CHECK_WINDOW;
+    if (where[0] == 'p' && where[1] == 'o' && where[3] == '-') {
+        flags |= _PY_CONTROLSTACK_CHECK_IDLE;
+    }
+    if (_PyThreadState_CheckControlStack(tstate, flags, buf, sizeof(buf)) < 0) {
+        _Py_FatalErrorFormat(__func__, "control stack invariant violated (%s): %s", where, buf);
+    }
+}
+#endif
 
 
 #ifndef NDEBUG
