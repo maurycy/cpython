@@ -98,20 +98,20 @@ static inline _PyStackRef *_PyFrame_Stackbase(_PyControlRecord *f, _PyInterprete
 }
 
 static inline _PyStackRef _PyFrame_StackPeek(_PyControlRecord *f, int depth) {
-    assert(f->stackpointer > _PyFrame_Stackbase(f, f->data));
-    assert(!PyStackRef_IsNull(f->stackpointer[-depth]));
-    return f->stackpointer[-depth];
+    assert(f->data->stackpointer > _PyFrame_Stackbase(f, f->data));
+    assert(!PyStackRef_IsNull(f->data->stackpointer[-depth]));
+    return f->data->stackpointer[-depth];
 }
 
 static inline _PyStackRef _PyFrame_StackPop(_PyControlRecord *f) {
-    assert(f->stackpointer > _PyFrame_Stackbase(f, f->data));
-    f->stackpointer--;
-    return *f->stackpointer;
+    assert(f->data->stackpointer > _PyFrame_Stackbase(f, f->data));
+    f->data->stackpointer--;
+    return *f->data->stackpointer;
 }
 
 static inline void _PyFrame_StackPush(_PyControlRecord *f, _PyStackRef value) {
-    *f->stackpointer = value;
-    f->stackpointer++;
+    *f->data->stackpointer = value;
+    f->data->stackpointer++;
 }
 
 #define FRAME_SPECIALS_SIZE ((int)(offsetof(_PyInterpreterDataFrame, localsplus) / sizeof(PyObject *)))
@@ -145,10 +145,10 @@ _PyFrame_Copy(_PyControlRecord *src, _PyInterpreterDataFrame *src_data,
 #ifdef Py_GIL_DISABLED
     dest->tlbc_index = src->tlbc_index;
 #endif
-    assert(src->stackpointer != NULL);
-    int stacktop = (int)(src->stackpointer - src_data->localsplus);
+    assert(src_data->stackpointer != NULL);
+    int stacktop = (int)(src_data->stackpointer - src_data->localsplus);
     assert(stacktop >= 0);
-    dest->stackpointer = dest_data->localsplus + stacktop;
+    dest_data->stackpointer = dest_data->localsplus + stacktop;
     // visited is GC bookkeeping for the current stack walk, not frame state.
     dest->visited = 0;
 #ifdef Py_DEBUG
@@ -193,7 +193,7 @@ _PyFrame_Initialize(
     fp->f_builtins = func_obj->func_builtins;
     fp->f_globals = func_obj->func_globals;
     fp->f_locals = locals;
-    frame->stackpointer = fp->localsplus + code->co_nlocalsplus;
+    fp->stackpointer = fp->localsplus + code->co_nlocalsplus;
     fp->frame_obj = NULL;
 #ifdef Py_GIL_DISABLED
     _PyFrame_InitializeTLBC(tstate, frame, code);
@@ -229,13 +229,13 @@ _PyFrame_GetLocalsArray(_PyInterpreterDataFrame *frame)
 static inline _PyStackRef*
 _PyFrame_GetStackPointer(_PyControlRecord *frame)
 {
-    return frame->stackpointer;
+    return frame->data->stackpointer;
 }
 
 static inline void
 _PyFrame_SetStackPointer(_PyControlRecord *frame, _PyStackRef *stack_pointer)
 {
-    frame->stackpointer = stack_pointer;
+    frame->data->stackpointer = stack_pointer;
 }
 
 static inline void
@@ -507,7 +507,6 @@ _PyThreadState_PopControl(PyThreadState *tstate, _PyControlRecord *frame)
 #ifdef Py_DEBUG
     frame->f_executable = PyStackRef_NULL;
     frame->instr_ptr = (_Py_CODEUNIT *)(uintptr_t)0xDDDDDDDDDDDDDDD0ULL;
-    frame->stackpointer = (_PyStackRef *)(uintptr_t)0xDDDDDDDDDDDDDDD8ULL;
     frame->data = (_PyInterpreterDataFrame *)(uintptr_t)0xDDDDDDDDDDDDDDE0ULL;
     frame->owner = (char)0x5d;
     frame->state = CONTROL_DETACHED;
@@ -592,7 +591,7 @@ _PyFrame_PushTrampoline(PyThreadState *tstate, PyCodeObject *code, int stackdept
 #endif
     fp->f_locals = NULL;
     assert(stackdepth <= code->co_stacksize);
-    frame->stackpointer = fp->localsplus + code->co_nlocalsplus + stackdepth;
+    fp->stackpointer = fp->localsplus + code->co_nlocalsplus + stackdepth;
     fp->frame_obj = NULL;
 #ifdef Py_GIL_DISABLED
     _PyFrame_InitializeTLBC(tstate, frame, code);

@@ -1741,7 +1741,7 @@ init_threadstate(_PyThreadStateImpl *_tstate,
     base->f_executable = PyStackRef_None;
     _tstate->base_data.f_funcobj = PyStackRef_NULL;
     _tstate->base_data.localsplus[0] = PyStackRef_NULL;
-    base->stackpointer = _tstate->base_data.localsplus;
+    _tstate->base_data.stackpointer = _tstate->base_data.localsplus;
     base->owner = FRAME_OWNED_BY_INTERPRETER;
     base->state = CONTROL_BASE;
 #ifdef Py_DEBUG
@@ -3651,16 +3651,16 @@ _PyThreadState_CheckControlStack(PyThreadState *tstate, int flags,
 #ifdef Py_DEBUG
             if (r->stackpointer_valid && st != CONTROL_DETACHED) {
                 _PyStackRef *lp = r->data->localsplus;
-                if (r->stackpointer < lp) {
-                    CS_FAIL("S1: slot %zd stackpointer %p below localsplus %p", i, (void *)r->stackpointer, (void *)lp);
+                if (r->data->stackpointer < lp) {
+                    CS_FAIL("S1: slot %zd stackpointer %p below localsplus %p", i, (void *)r->data->stackpointer, (void *)lp);
                 }
                 if (!PyStackRef_IsNull(r->f_executable)) {
                     PyObject *ex = PyStackRef_AsPyObjectBorrow(r->f_executable);
                     if (ex != NULL && PyCode_Check(ex)) {
                         PyCodeObject *co = (PyCodeObject *)ex;
                         _PyStackRef *hi = lp + co->co_nlocalsplus + co->co_stacksize;
-                        if (r->stackpointer > hi) {
-                            CS_FAIL("S1: slot %zd stackpointer %p above limit %p", i, (void *)r->stackpointer, (void *)hi);
+                        if (r->data->stackpointer > hi) {
+                            CS_FAIL("S1: slot %zd stackpointer %p above limit %p", i, (void *)r->data->stackpointer, (void *)hi);
                         }
                     }
                 }

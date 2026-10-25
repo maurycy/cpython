@@ -476,7 +476,7 @@ _PyGC_VisitFrameStack(_PyControlRecord *frame, _PyInterpreterDataFrame *fp,
 {
     _PyStackRef *ref = _PyFrame_GetLocalsArray(fp);
     /* locals and stack */
-    for (; ref < frame->stackpointer; ref++) {
+    for (; ref < fp->stackpointer; ref++) {
         if (!PyStackRef_IsTaggedInt(*ref)) {
             _Py_VISIT_STACKREF(*ref);
         }

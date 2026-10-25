@@ -32,6 +32,7 @@ struct _PyInterpreterDataFrame {
     PyObject *f_builtins;
     PyObject *f_locals;
     PyFrameObject *frame_obj;
+    _PyStackRef *stackpointer;
     _PyStackRef localsplus[1];
 };
 
@@ -45,7 +46,6 @@ enum _controlstate {
 struct _PyControlRecord {
     _PyStackRef f_executable; /* Deferred or strong reference (code object or None) */
     _Py_CODEUNIT *instr_ptr; /* Instruction currently executing (or about to begin) */
-    _PyStackRef *stackpointer;
     _PyInterpreterDataFrame *data;
 #ifdef Py_GIL_DISABLED
     /* Index of thread-local bytecode containing instr_ptr. */

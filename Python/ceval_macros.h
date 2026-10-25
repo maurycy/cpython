@@ -631,7 +631,7 @@ _PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value
             !_PyGen_ResumeCheckPasses(tstate, saved)) {
             break;
         }
-        PyObject *receiver = PyStackRef_AsPyObjectBorrow(saved->stackpointer[-2]);
+        PyObject *receiver = PyStackRef_AsPyObjectBorrow(saved->data->stackpointer[-2]);
         if (Py_TYPE(receiver) != &PyGen_Type && Py_TYPE(receiver) != &PyCoro_Type) {
             break;
         }

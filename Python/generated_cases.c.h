@@ -13865,7 +13865,7 @@ JUMP_TO_LABEL(error);
             if (handled == 0) {
                 assert(_PyErr_Occurred(tstate));
                 _PyStackRef *stackbase = _PyFrame_Stackbase(frame, fp);
-                while (frame->stackpointer > stackbase) {
+                while (fp->stackpointer > stackbase) {
                     _PyStackRef ref = _PyFrame_StackPop(frame);
                     PyStackRef_XCLOSE(ref);
                 }
@@ -13874,8 +13874,8 @@ JUMP_TO_LABEL(error);
             }
             assert(STACK_LEVEL() >= level);
             _PyStackRef *new_top = _PyFrame_Stackbase(frame, fp) + level;
-            assert(frame->stackpointer >= new_top);
-            while (frame->stackpointer > new_top) {
+            assert(fp->stackpointer >= new_top);
+            while (fp->stackpointer > new_top) {
                 _PyStackRef ref = _PyFrame_StackPop(frame);
                 PyStackRef_XCLOSE(ref);
             }

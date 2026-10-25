@@ -1068,7 +1068,7 @@ gen_copy_frame(PyGenObject *gen, _PyControlRecord *dest,
     *dest = *gen->gi_live_frame;
     dest->state = (uint8_t)state;
     if (value_ref != NULL) {
-        *dest->stackpointer++ = _PyThreadState_PopCStackRefSteal(
+        *dest->data->stackpointer++ = _PyThreadState_PopCStackRefSteal(
             _PyThreadState_GET(), value_ref);
     }
     if (f != NULL) {

@@ -270,7 +270,7 @@ parse_frame_from_chunks(
 
     char *frame = (char *)frame_ptr;
     *previous_frame = GET_MEMBER(uintptr_t, frame, unwinder->debug_offsets.interpreter_frame.previous);
-    *stackpointer = GET_MEMBER(uintptr_t, frame, unwinder->debug_offsets.interpreter_frame.stackpointer);
+    *stackpointer = 0;
     uintptr_t code_object = GET_MEMBER_NO_TAG(uintptr_t, frame_ptr, unwinder->debug_offsets.interpreter_frame.executable);
     int frame_valid = is_frame_valid(unwinder, (uintptr_t)frame, code_object);
     if (frame_valid != 1) {

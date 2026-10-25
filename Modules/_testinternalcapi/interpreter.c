@@ -53,7 +53,7 @@ Test_EvalFrame(PyThreadState *tstate, _PyControlRecord *frame, int throwflag)
 #if !_Py_TAIL_CALL_INTERP
     uint8_t opcode;        /* Current opcode */
     int oparg;         /* Current opcode argument, if any */
-    assert(tstate->current_frame == NULL || tstate->current_frame->stackpointer != NULL);
+    assert(tstate->current_frame == NULL || tstate->current_frame->data->stackpointer != NULL);
 #if !USE_COMPUTED_GOTOS
     uint8_t tracing_mode = 0;
     uint8_t dispatch_code;
@@ -90,7 +90,7 @@ Test_EvalFrame(PyThreadState *tstate, _PyControlRecord *frame, int throwflag)
 #endif
     entry->f_executable = PyStackRef_None;
     entry->instr_ptr = (_Py_CODEUNIT *)_Py_INTERPRETER_TRAMPOLINE_INSTRUCTIONS_PTR + 1;
-    entry->stackpointer = entry_data.data.localsplus + 1;
+    entry_data.data.stackpointer = entry_data.data.localsplus + 1;
     entry->owner = FRAME_OWNED_BY_INTERPRETER;
     entry->visited = 0;
     entry->return_offset = 0;

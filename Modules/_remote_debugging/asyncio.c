@@ -321,7 +321,15 @@ get_awaited_coro_address(
         return -1;
     }
 
-    uintptr_t stackpointer_addr = GET_MEMBER_NO_TAG(uintptr_t, iframe, unwinder->debug_offsets.interpreter_frame.stackpointer);
+    /* The value stack pointer lives in the data frame the record points to. */
+    uintptr_t data_addr = GET_MEMBER_NO_TAG(uintptr_t, iframe, unwinder->debug_offsets.interpreter_frame.localsplus);
+    uintptr_t stackpointer_addr = 0;
+    if ((void*)data_addr != NULL) {
+        if (read_py_ptr(unwinder, data_addr + (uintptr_t)unwinder->debug_offsets.interpreter_frame.stackpointer, &stackpointer_addr) < 0) {
+            set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read data frame stack pointer");
+            return -1;
+        }
+    }
 
     if ((void*)stackpointer_addr != NULL) {
         err = read_py_ptr(

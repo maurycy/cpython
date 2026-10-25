@@ -128,7 +128,7 @@ typedef struct _Py_DebugOffsets {
         uint64_t instr_ptr;
         uint64_t localsplus;
         uint64_t owner;
-        uint64_t stackpointer;
+        uint64_t stackpointer;  /* offset inside the data frame (reached through localsplus) */
         uint64_t tlbc_index;
     } interpreter_frame;
 
@@ -315,7 +315,7 @@ typedef struct _Py_DebugOffsets {
         .instr_ptr = offsetof(_PyControlRecord, instr_ptr), \
         .localsplus = offsetof(_PyControlRecord, data), \
         .owner = offsetof(_PyControlRecord, owner), \
-        .stackpointer = offsetof(_PyControlRecord, stackpointer), \
+        .stackpointer = offsetof(_PyInterpreterDataFrame, stackpointer), \
         .tlbc_index = _Py_Debug_interpreter_frame_tlbc_index, \
     }, \
     .code_object = { \

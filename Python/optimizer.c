@@ -1080,7 +1080,7 @@ _PyJit_translate_single_bytecode_to_trace(
         ADD_TO_TRACE(guard_ip, 0, (uintptr_t)next_instr, 0);
         if (PyCode_Check(code)) {
             /* Record stack depth, in operand1 */
-            int stack_depth = (int)(frame->stackpointer - _PyFrame_Stackbase(frame, frame->data));
+            int stack_depth = (int)(frame->data->stackpointer - _PyFrame_Stackbase(frame, frame->data));
             uop_buffer_last(trace)->operand1 = stack_depth;
             ADD_TO_TRACE(guard_code_version_uop[last_opcode], 0, ((PyCodeObject *)code)->co_version, 0);
         }

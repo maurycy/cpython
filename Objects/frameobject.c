@@ -2112,7 +2112,7 @@ frame_dealloc(PyObject *op)
         PyStackRef_CLEAR(frame->data->f_funcobj);
         Py_CLEAR(frame->data->f_locals);
         _PyStackRef *locals = _PyFrame_GetLocalsArray(frame->data);
-        _PyStackRef *sp = frame->stackpointer;
+        _PyStackRef *sp = frame->data->stackpointer;
         while (sp > locals) {
             sp--;
             PyStackRef_CLEAR(*sp);
@@ -2153,13 +2153,13 @@ frame_tp_clear(PyObject *op)
 
     /* locals and stack */
     _PyStackRef *locals = _PyFrame_GetLocalsArray(f->f_frame->data);
-    _PyStackRef *sp = f->f_frame->stackpointer;
+    _PyStackRef *sp = f->f_frame->data->stackpointer;
     assert(sp >= locals);
     while (sp > locals) {
         sp--;
         PyStackRef_CLEAR(*sp);
     }
-    f->f_frame->stackpointer = locals;
+    f->f_frame->data->stackpointer = locals;
     Py_CLEAR(f->f_frame->data->f_locals);
     return 0;
 }
@@ -2388,7 +2388,7 @@ frame_get_var(_PyControlRecord *frame, PyCodeObject *co, int i,
     }
 
     PyObject *value = NULL;
-    if (frame->stackpointer == NULL || frame->stackpointer > frame->data->localsplus + i) {
+    if (frame->data->stackpointer == NULL || frame->data->stackpointer > frame->data->localsplus + i) {
         value = PyStackRef_AsPyObjectBorrow(frame->data->localsplus[i]);
         if (kind & CO_FAST_FREE) {
             // The cell was set by COPY_FREE_VARS.

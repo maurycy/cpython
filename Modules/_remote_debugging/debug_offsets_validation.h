@@ -289,7 +289,6 @@ validate_fixed_field(
     APPLY(interpreter_frame, executable, sizeof(uintptr_t), _Alignof(uintptr_t), buffer_size); \
     APPLY(interpreter_frame, instr_ptr, sizeof(uintptr_t), _Alignof(uintptr_t), buffer_size); \
     APPLY(interpreter_frame, owner, sizeof(char), _Alignof(char), buffer_size); \
-    APPLY(interpreter_frame, stackpointer, sizeof(uintptr_t), _Alignof(uintptr_t), buffer_size); \
     APPLY(interpreter_frame, tlbc_index, sizeof(int32_t), _Alignof(int32_t), buffer_size)
 
 #define PY_REMOTE_DEBUG_CODE_OBJECT_FIELDS(APPLY, buffer_size) \

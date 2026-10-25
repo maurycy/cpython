@@ -99,10 +99,10 @@ _PyFrame_TakeOwnership(PyFrameObject *f, _PyControlRecord *frame, _PyInterpreter
 void
 _PyFrame_ClearLocals(_PyControlRecord *frame, _PyInterpreterDataFrame *fp)
 {
-    assert(frame->stackpointer != NULL);
-    _PyStackRef *sp = frame->stackpointer;
+    assert(fp->stackpointer != NULL);
+    _PyStackRef *sp = fp->stackpointer;
     _PyStackRef *locals = fp->localsplus;
-    frame->stackpointer = locals;
+    fp->stackpointer = locals;
     while (sp > locals) {
         sp--;
         PyStackRef_XCLOSE(*sp);

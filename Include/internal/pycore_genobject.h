@@ -36,8 +36,8 @@ PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _Py
 PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
 #else
 /* gi_iframe is a complete DETACHED record, so restoring is one struct copy.
-   The stack pointer is kept in a register across the copy so pushing the
-   sent value does not reload it from the bytes just written. When ip is
+   The stack pointer lives in the generator's data frame, so pushing the
+   sent value touches neither the saved nor the live record. When ip is
    not NULL it replaces the saved instruction pointer, so the slot is
    written once with its final contents. */
 static inline Py_ALWAYS_INLINE void
@@ -49,22 +49,21 @@ _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, 
     /* Read the whole saved record into registers before the first store
        to the slot: when the two share the low 12 bits of their addresses,
        a load issued after a store to the other one waits for that store
-       to retire (4K aliasing). Five scalar words keep gcc from spilling. */
-    uint64_t w0, w1, w2, w3, w4;
+       to retire (4K aliasing). Four scalar words keep gcc from spilling. */
+    _Static_assert(sizeof(_PyControlRecord) == 32, "control record is four words");
+    uint64_t w0, w1, w2, w3;
     memcpy(&w0, (const char *)&gen->gi_iframe + 0, 8);
     memcpy(&w1, (const char *)&gen->gi_iframe + 8, 8);
     memcpy(&w2, (const char *)&gen->gi_iframe + 16, 8);
     memcpy(&w3, (const char *)&gen->gi_iframe + 24, 8);
-    memcpy(&w4, (const char *)&gen->gi_iframe + 32, 8);
-    /* Keep the five words in general registers: the LTO build merged
+    /* Keep the four words in general registers: the LTO build merged
        these loads into 16-byte vector loads, which cannot be forwarded
-       from the 8-byte stores the last suspend made to the same fields
-       (four store-to-load interlocks per resume). */
-    __asm__("" : "+r"(w0), "+r"(w1), "+r"(w2), "+r"(w3), "+r"(w4));
-    _PyStackRef *sp = (_PyStackRef *)(uintptr_t)w2;
+       from the 8-byte stores the last suspend made to the same fields. */
+    __asm__("" : "+r"(w0), "+r"(w1), "+r"(w2), "+r"(w3));
     if (value != NULL) {
+        _PyStackRef *sp = gen->gi_data.stackpointer;
         *sp++ = *value;
-        w2 = (uint64_t)(uintptr_t)sp;
+        gen->gi_data.stackpointer = sp;
     }
     if (ip != NULL) {
         w1 = (uint64_t)(uintptr_t)ip;
@@ -73,7 +72,6 @@ _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, 
     memcpy((char *)frame + 8, &w1, 8);
     memcpy((char *)frame + 16, &w2, 8);
     memcpy((char *)frame + 24, &w3, 8);
-    memcpy((char *)frame + 32, &w4, 8);
     frame->state = (uint8_t)state;
     PyFrameObject *f = gen->gi_data.frame_obj;
     if (f != NULL) {
@@ -89,7 +87,6 @@ static inline void
 _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 {
     _Py_CODEUNIT *ip = frame->instr_ptr;
-    _PyStackRef *sp = frame->stackpointer;
     uint16_t return_offset = frame->return_offset;
 #ifdef Py_DEBUG
     uint8_t stackpointer_valid = frame->stackpointer_valid;
@@ -97,7 +94,6 @@ _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 #endif
     PyFrameObject *f = gen->gi_data.frame_obj;
     gen->gi_iframe.instr_ptr = ip;
-    gen->gi_iframe.stackpointer = sp;
     gen->gi_iframe.return_offset = return_offset;
 #ifdef Py_DEBUG
     gen->gi_iframe.stackpointer_valid = stackpointer_valid;
