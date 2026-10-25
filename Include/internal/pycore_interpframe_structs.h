@@ -36,6 +36,7 @@ struct _PyInterpreterDataFrame {
 };
 
 enum _controlstate {
+    CONTROL_INDIRECT,  /* A slot referring to a generator control record. */
     CONTROL_DETACHED,
     CONTROL_RESERVED,
     CONTROL_ACTIVE,
@@ -54,7 +55,7 @@ struct _PyControlRecord {
     uint16_t return_offset;  /* Only relevant during a function call */
     char owner;
     uint8_t visited:1;
-    uint8_t state:2;
+    uint8_t state:3;
 #ifdef Py_DEBUG
     uint8_t stackpointer_valid:1;
     uint8_t lltrace:5;
@@ -74,7 +75,8 @@ struct _PyControlRecord {
     PyObject *prefix##_qualname;                                            \
     _PyErr_StackItem prefix##_exc_state;                                    \
     PyObject *prefix##_origin_or_finalizer;                                 \
-    struct _PyControlRecord *prefix##_live_frame;                           \
+    /* Active control-stack slot, or NULL while suspended. */              \
+    struct _PyControlRecord *prefix##_control_slot;                         \
     int8_t prefix##_hooks_inited;                                           \
     int8_t prefix##_closed;                                                 \
     int8_t prefix##_running_async;                                          \

@@ -11,15 +11,6 @@ extern "C" {
 #include "pycore_frame.h"         // FRAME_STATE_FINISHED()
 #include "pycore_interpframe.h"
 
-#include <stddef.h>               // offsetof()
-
-
-static inline
-PyGenObject *_PyGen_GetGeneratorFromFrame(_PyInterpreterDataFrame *frame)
-{
-    return (PyGenObject *)(((char *)frame) - offsetof(PyGenObject, gi_data));
-}
-
 // The generator finalizer is a no-op once its frame is cleared.
 static inline int
 _PyGen_FinalizerIsNoop(PyObject *op)
@@ -27,75 +18,70 @@ _PyGen_FinalizerIsNoop(PyObject *op)
     return Py_TYPE(op)->tp_finalize == PyGen_Type.tp_finalize &&
         FRAME_STATE_FINISHED(((PyGenObject *)op)->gi_frame_state);
 }
-#ifdef Py_GIL_DISABLED
-PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value);
-PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
-#else
+
+/* The caller has set FRAME_EXECUTING and keeps the generator alive. */
 static inline void
-_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value)
+_PyGen_ActivateFrame(PyGenObject *gen, _PyControlRecord *slot,
+                     _PyStackRef *value)
 {
-    const _PyControlRecord *saved = &gen->gi_iframe;
-    unsigned int visited = saved->visited;
-#ifdef Py_DEBUG
-    unsigned int stackpointer_valid = saved->stackpointer_valid;
-    unsigned int lltrace = saved->lltrace;
-#endif
-    frame->f_executable = saved->f_executable;
-    frame->instr_ptr = saved->instr_ptr;
-    frame->stackpointer = saved->stackpointer;
-    frame->data = &gen->gi_data;
+    _PyControlRecord *frame = &gen->gi_iframe;
+    assert(gen->gi_control_slot == NULL);
+    assert(frame->state == CONTROL_DETACHED);
+    assert(frame->data == &gen->gi_data);
+    assert(frame->owner == FRAME_OWNED_BY_GENERATOR);
     if (value != NULL) {
         *frame->stackpointer++ = *value;
     }
+    slot->data = &gen->gi_data;
+    slot->state = CONTROL_INDIRECT;
     frame->state = CONTROL_RESERVED;
-    frame->return_offset = saved->return_offset;
-    frame->owner = FRAME_OWNED_BY_GENERATOR;
-    frame->visited = visited;
-#ifdef Py_DEBUG
-    frame->stackpointer_valid = stackpointer_valid;
-    frame->lltrace = lltrace;
-#endif
-    PyFrameObject *f = gen->gi_data.frame_obj;
-    if (f != NULL) {
-        f->f_frame = frame;
-    }
-    gen->gi_live_frame = frame;
+    gen->gi_control_slot = slot;
+}
+
+static inline void
+_PyGen_DeactivateFrame(PyGenObject *gen, _PyControlRecord *frame)
+{
+    assert(frame == &gen->gi_iframe);
+    assert(gen->gi_control_slot != NULL);
+    frame->state = CONTROL_DETACHED;
+    gen->gi_control_slot = NULL;
+}
+
+#ifdef Py_GIL_DISABLED
+PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *slot,
+                                 _PyStackRef *value);
+PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
+#else
+static inline void
+_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *slot, _PyStackRef *value)
+{
+    _PyGen_ActivateFrame(gen, slot, value);
 }
 
 static inline void
 _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 {
-    gen->gi_iframe.instr_ptr = frame->instr_ptr;
-    gen->gi_iframe.stackpointer = frame->stackpointer;
-    gen->gi_iframe.return_offset = frame->return_offset;
-#ifdef Py_DEBUG
-    gen->gi_iframe.stackpointer_valid = frame->stackpointer_valid;
-    gen->gi_iframe.lltrace = frame->lltrace;
-#endif
-    PyFrameObject *f = gen->gi_data.frame_obj;
-    if (f != NULL) {
-        f->f_frame = &gen->gi_iframe;
-    }
-    gen->gi_live_frame = &gen->gi_iframe;
+    _PyGen_DeactivateFrame(gen, frame);
 }
 #endif
 
 static inline _PyControlRecord *
 _PyGen_PushFrameUnchecked(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value)
 {
-    assert(gen->gi_live_frame == &gen->gi_iframe);
+    assert(gen->gi_control_slot == NULL);
     _PyControlRecord *frame = _PyThreadState_PushControlUnchecked(tstate);
     _PyGen_LinkFrame(gen, frame, &value);
-    return frame;
+    return &gen->gi_iframe;
 }
 
 static inline _PyControlRecord *
 _PyGen_PushFrame(PyThreadState *tstate, PyGenObject *gen)
 {
-    assert(gen->gi_live_frame == &gen->gi_iframe);
+    assert(gen->gi_control_slot == NULL);
     _PyControlRecord *frame = _PyThreadState_PushControl(tstate);
     if (frame != NULL) {
         _PyGen_LinkFrame(gen, frame, NULL);
+        return &gen->gi_iframe;
     }
     return frame;
 }
@@ -103,10 +89,10 @@ _PyGen_PushFrame(PyThreadState *tstate, PyGenObject *gen)
 static inline void
 _PyGen_PopFrame(PyThreadState *tstate, PyGenObject *gen, _PyControlRecord *frame)
 {
-    assert(gen->gi_live_frame == frame);
+    _PyControlRecord *slot = gen->gi_control_slot;
     frame->state = CONTROL_RESERVED;
     _PyGen_UnlinkFrame(gen, frame);
-    _PyThreadState_PopControl(tstate, frame);
+    _PyThreadState_PopControl(tstate, slot);
 }
 
 PyAPI_FUNC(PyObject *)_PyGen_yf(PyGenObject *);

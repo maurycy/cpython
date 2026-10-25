@@ -18,6 +18,24 @@ extern "C" {
 #define _PyControlRecord_LASTI(IF) \
     ((int)((IF)->instr_ptr - _PyFrame_GetBytecode((IF))))
 
+static inline PyGenObject *
+_PyGen_GetGeneratorFromFrame(_PyInterpreterDataFrame *frame)
+{
+    return (PyGenObject *)((char *)frame - offsetof(PyGenObject, gi_data));
+}
+
+static inline _PyControlRecord *
+_PyFrame_GetControlSlot(_PyControlRecord *frame)
+{
+    if (frame->owner == FRAME_OWNED_BY_GENERATOR) {
+        PyGenObject *gen = (PyGenObject *)((char *)frame
+            - offsetof(PyGenObject, gi_iframe));
+        assert(frame->data == &gen->gi_data);
+        return gen->gi_control_slot;
+    }
+    return frame;
+}
+
 static inline PyCodeObject *_PyFrame_GetCode(_PyControlRecord *f) {
     assert(!PyStackRef_IsNull(f->f_executable));
     PyObject *executable = PyStackRef_AsPyObjectBorrow(f->f_executable);
@@ -296,14 +314,31 @@ _PyFrame_IsIncomplete(_PyControlRecord *frame)
                                   _PyFrame_GetCode(frame)->_co_firsttraceable;
 }
 
+/* Ordinary callers are adjacent control records. Only generator slots need
+   an indirection; their activation state lives in gi_iframe. */
+static inline _PyControlRecord *
+_PyFrame_GetCallerFromSlot(_PyControlRecord *slot)
+{
+    for (;;) {
+        --slot;
+        if (slot->state >= CONTROL_ACTIVE) {
+            return slot;
+        }
+        if (slot->state == CONTROL_INDIRECT) {
+            _PyControlRecord *frame =
+                &_PyGen_GetGeneratorFromFrame(slot->data)->gi_iframe;
+            if (frame->state == CONTROL_ACTIVE) {
+                return frame;
+            }
+        }
+    }
+}
+
 static inline _PyControlRecord *
 _PyFrame_GetCaller(_PyControlRecord *frame)
 {
     assert(frame->state != CONTROL_DETACHED && frame->state != CONTROL_BASE);
-    do {
-        --frame;
-    } while (frame->state < CONTROL_ACTIVE);
-    return frame;
+    return _PyFrame_GetCallerFromSlot(_PyFrame_GetControlSlot(frame));
 }
 
 static inline _PyControlRecord *

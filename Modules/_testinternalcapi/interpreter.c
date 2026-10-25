@@ -59,7 +59,7 @@ Test_EvalFrame(PyThreadState *tstate, _PyControlRecord *frame, int throwflag)
     uint8_t dispatch_code;
 #endif
 #endif
-    _PyControlRecord *entry = frame - 1;
+    _PyControlRecord *entry = _PyFrame_GetControlSlot(frame) - 1;
     struct {
         _PyInterpreterDataFrame data;
         _PyStackRef result;

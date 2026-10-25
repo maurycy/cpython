@@ -85,7 +85,7 @@ gen_traverse(PyObject *self, visitproc visit, void *arg)
     Py_VISIT(gen->gi_name);
     Py_VISIT(gen->gi_qualname);
     if (gen->gi_frame_state != FRAME_CLEARED) {
-        _PyControlRecord *frame = gen->gi_live_frame;
+        _PyControlRecord *frame = &gen->gi_iframe;
         assert(frame->data->frame_obj == NULL ||
                frame->data->frame_obj->f_frame->owner == FRAME_OWNED_BY_GENERATOR);
         int err = _PyFrame_Traverse(frame, &gen->gi_data, visit, arg);
@@ -96,7 +96,7 @@ gen_traverse(PyObject *self, visitproc visit, void *arg)
     else {
         // We still need to visit the code object when the frame is cleared to
         // ensure that it's kept alive if the reference is deferred.
-        _Py_VISIT_STACKREF(gen->gi_live_frame->f_executable);
+        _Py_VISIT_STACKREF(gen->gi_iframe.f_executable);
     }
     /* No need to visit cr_origin, because it's just tuples/str/int, so can't
        participate in a reference cycle. */
@@ -295,7 +295,7 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
     assert(tstate->exc_info == prev_exc_info);
 #ifndef Py_GIL_DISABLED
     assert(gen->gi_exc_state.previous_item == NULL);
-    assert(gen->gi_live_frame == &gen->gi_iframe);
+    assert(gen->gi_control_slot == NULL);
     assert(gen->gi_iframe.state == CONTROL_DETACHED);
     assert(gen->gi_frame_state != FRAME_EXECUTING);
 #endif
@@ -979,7 +979,7 @@ _gen_getframe(PyGenObject *gen, const char *const name)
         frame = Py_None;
     }
     else {
-        frame = _Py_XNewRef((PyObject *)_PyFrame_GetFrameObject(gen->gi_live_frame, &gen->gi_data));
+        frame = _Py_XNewRef((PyObject *)_PyFrame_GetFrameObject(&gen->gi_iframe, &gen->gi_data));
     }
     Py_END_CRITICAL_SECTION();
     return frame;
@@ -1030,24 +1030,22 @@ static PyMemberDef gen_memberlist[] = {
 
 #ifdef Py_GIL_DISABLED
 static void
-gen_copy_frame(PyGenObject *gen, _PyControlRecord *dest,
-               PyFrameObject *f, _PyCStackRef *value_ref)
+gen_activate_frame(PyGenObject *gen, _PyControlRecord *slot,
+                   _PyCStackRef *value_ref)
 {
-    *dest = *gen->gi_live_frame;
-    dest->state = dest == &gen->gi_iframe ? CONTROL_DETACHED : CONTROL_RESERVED;
+    _PyStackRef value;
     if (value_ref != NULL) {
-        *dest->stackpointer++ = _PyThreadState_PopCStackRefSteal(
-            _PyThreadState_GET(), value_ref);
+        value = _PyThreadState_PopCStackRefSteal(_PyThreadState_GET(), value_ref);
     }
-    if (f != NULL) {
-        f->f_frame = dest;
-    }
-    FT_ATOMIC_STORE_PTR_RELEASE(gen->gi_live_frame, dest);
+    _PyGen_ActivateFrame(gen, slot, value_ref != NULL ? &value : NULL);
 }
 
-static void
-gen_transfer_frame(PyGenObject *gen, _PyControlRecord *dest, _PyStackRef *value)
+void
+_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *slot,
+                 _PyStackRef *value)
 {
+    /* Acquiring either lock can suspend this thread. Keep the sent value
+       visible to GC until the canonical record takes ownership of it. */
     _PyCStackRef value_ref;
     if (value != NULL) {
         _PyThreadState_PushCStackRef(_PyThreadState_GET(), &value_ref);
@@ -1057,26 +1055,29 @@ gen_transfer_frame(PyGenObject *gen, _PyControlRecord *dest, _PyStackRef *value)
     PyFrameObject *f = gen->gi_data.frame_obj;
     if (f != NULL) {
         Py_BEGIN_CRITICAL_SECTION(f);
-        gen_copy_frame(gen, dest, f, value != NULL ? &value_ref : NULL);
+        gen_activate_frame(gen, slot, value != NULL ? &value_ref : NULL);
         Py_END_CRITICAL_SECTION();
     }
     else {
-        gen_copy_frame(gen, dest, NULL, value != NULL ? &value_ref : NULL);
+        gen_activate_frame(gen, slot, value != NULL ? &value_ref : NULL);
     }
     Py_END_CRITICAL_SECTION();
 }
 
 void
-_PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value)
-{
-    gen_transfer_frame(gen, frame, value);
-}
-
-void
 _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame)
 {
-    assert(gen->gi_live_frame == frame);
-    gen_transfer_frame(gen, &gen->gi_iframe, NULL);
+    Py_BEGIN_CRITICAL_SECTION(gen);
+    PyFrameObject *f = gen->gi_data.frame_obj;
+    if (f != NULL) {
+        Py_BEGIN_CRITICAL_SECTION(f);
+        _PyGen_DeactivateFrame(gen, frame);
+        Py_END_CRITICAL_SECTION();
+    }
+    else {
+        _PyGen_DeactivateFrame(gen, frame);
+    }
+    Py_END_CRITICAL_SECTION();
 }
 #endif
 
@@ -1177,7 +1178,7 @@ make_gen(PyTypeObject *type, PyFunctionObject *func)
     gen->gi_frame_state = FRAME_CLEARED;
     gen->gi_iframe.data = &gen->gi_data;
     gen->gi_iframe.state = CONTROL_DETACHED;
-    gen->gi_live_frame = &gen->gi_iframe;
+    gen->gi_control_slot = NULL;
     gen->gi_weakreflist = NULL;
     gen->gi_exc_state.exc_value = NULL;
     gen->gi_exc_state.previous_item = NULL;
@@ -1255,7 +1256,7 @@ gen_new_with_qualname(PyTypeObject *type, PyFrameObject *f,
     assert(f->f_frame->owner == FRAME_OWNED_BY_FRAME_OBJECT);
     _PyControlRecord *frame = &gen->gi_iframe;
     frame->data = &gen->gi_data;
-    gen->gi_live_frame = frame;
+    gen->gi_control_slot = NULL;
     _PyFrame_Copy(f->f_frame, f->f_frame->data, frame, &gen->gi_data);
     gen->gi_frame_state = FRAME_CREATED;
     assert(gen->gi_data.frame_obj == f);

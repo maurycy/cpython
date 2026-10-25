@@ -665,6 +665,7 @@ NON_ESCAPING_FUNCTIONS = (
     "_PyThreadState_UpdateControlLimit",
     "_PyThreadState_AdjustControlLimit",
     "_PyFrame_GetCaller",
+    "_PyFrame_GetCallerFromSlot",
     "_PyFrame_GetPrevious",
     "PyMutex_LockFast",
     "PyMutex_Unlock",

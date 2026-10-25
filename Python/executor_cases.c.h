@@ -8790,7 +8790,7 @@
             assert(STACK_LEVEL() == 0);
             DTRACE_FUNCTION_RETURN();
             _PyControlRecord *dying = frame;
-            frame = tstate->current_frame = _PyFrame_GetCaller(dying);
+            frame = tstate->current_frame = _PyFrame_GetCallerFromSlot(tstate->controlstack_top - 1);
             _PyEval_FrameClearAndPop(tstate, dying, fp);
             fp = frame->data;
             stack_pointer = _PyFrame_GetStackPointer(frame);
@@ -9544,8 +9544,8 @@
             tstate->exc_info = gen->gi_exc_state.previous_item;
             gen->gi_exc_state.previous_item = NULL;
             _PyControlRecord *gen_frame = frame;
-            _PyThreadState_UpdateLastProfiledFrame(tstate, gen_frame, _PyFrame_GetCaller(gen_frame));
-            frame = tstate->current_frame = _PyFrame_GetCaller(frame);
+            _PyThreadState_UpdateLastProfiledFrame(tstate, gen_frame, _PyFrame_GetCallerFromSlot(gen->gi_control_slot));
+            frame = tstate->current_frame = _PyFrame_GetCallerFromSlot(gen->gi_control_slot);
             fp = frame->data;
             _PyGen_PopFrame(tstate, gen, gen_frame);
             assert(INLINE_CACHE_ENTRIES_SEND == INLINE_CACHE_ENTRIES_FOR_ITER);
@@ -20595,7 +20595,7 @@
             assert(fp->frame_obj == NULL);
             gen->gi_frame_state = FRAME_CREATED;
             gen_frame->owner = FRAME_OWNED_BY_GENERATOR;
-            _PyControlRecord *prev = _PyFrame_GetCaller(frame);
+            _PyControlRecord *prev = _PyFrame_GetCallerFromSlot(frame);
             _PyThreadState_UpdateLastProfiledFrame(tstate, frame, prev);
             _PyThreadState_PopFrame(tstate, frame, fp);
             frame = tstate->current_frame = prev;

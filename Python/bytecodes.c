@@ -1545,7 +1545,7 @@ dummy_func(
             assert(frame->owner == FRAME_OWNED_BY_INTERPRETER);
             assert(_PyFrame_IsIncomplete(frame));
             /* Restore previous frame and return. */
-            tstate->current_frame = _PyFrame_GetCaller(frame);
+            tstate->current_frame = _PyFrame_GetCallerFromSlot(frame);
             frame->state = CONTROL_RESERVED;
             assert(!_PyErr_Occurred(tstate));
             PyObject *result = PyStackRef_AsPyObjectSteal(retval);
@@ -1586,7 +1586,7 @@ dummy_func(
             DTRACE_FUNCTION_RETURN();
             // GH-99729: We need to unlink the frame *before* clearing it:
             _PyControlRecord *dying = frame;
-            frame = tstate->current_frame = _PyFrame_GetCaller(dying);
+            frame = tstate->current_frame = _PyFrame_GetCallerFromSlot(tstate->controlstack_top - 1);
             _PyEval_FrameClearAndPop(tstate, dying, fp);
             fp = frame->data;
             RELOAD_STACK();
@@ -1884,8 +1884,8 @@ dummy_func(
             tstate->exc_info = gen->gi_exc_state.previous_item;
             gen->gi_exc_state.previous_item = NULL;
             _PyControlRecord *gen_frame = frame;
-            _PyThreadState_UpdateLastProfiledFrame(tstate, gen_frame, _PyFrame_GetCaller(gen_frame));
-            frame = tstate->current_frame = _PyFrame_GetCaller(frame);
+            _PyThreadState_UpdateLastProfiledFrame(tstate, gen_frame, _PyFrame_GetCallerFromSlot(gen->gi_control_slot));
+            frame = tstate->current_frame = _PyFrame_GetCallerFromSlot(gen->gi_control_slot);
             fp = frame->data;
             _PyGen_PopFrame(tstate, gen, gen_frame);
             /* We don't know which of these is relevant here, so keep them equal */
@@ -5823,7 +5823,7 @@ dummy_func(
             assert(fp->frame_obj == NULL);
             gen->gi_frame_state = FRAME_CREATED;
             gen_frame->owner = FRAME_OWNED_BY_GENERATOR;
-            _PyControlRecord *prev = _PyFrame_GetCaller(frame);
+            _PyControlRecord *prev = _PyFrame_GetCallerFromSlot(frame);
             _PyThreadState_UpdateLastProfiledFrame(tstate, frame, prev);
             _PyThreadState_PopFrame(tstate, frame, fp);
             frame = tstate->current_frame = prev;
@@ -6547,13 +6547,13 @@ dummy_func(
             assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
             // GH-99729: We need to unlink the frame *before* clearing it:
             _PyControlRecord *dying = frame;
-            frame = tstate->current_frame = _PyFrame_GetCaller(dying);
+            frame = tstate->current_frame = _PyFrame_GetCallerFromSlot(tstate->controlstack_top - 1);
             _PyEval_FrameClearAndPop(tstate, dying, fp);
             fp = frame->data;
             frame->return_offset = 0;
             if (frame->owner == FRAME_OWNED_BY_INTERPRETER) {
                 /* Restore previous frame and exit */
-                tstate->current_frame = _PyFrame_GetCaller(frame);
+                tstate->current_frame = _PyFrame_GetCallerFromSlot(frame);
                 frame->state = CONTROL_RESERVED;
 #if !_Py_TAIL_CALL_INTERP
                 assert(frame == entry);

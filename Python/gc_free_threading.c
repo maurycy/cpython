@@ -292,7 +292,7 @@ disable_deferred_refcounting(PyObject *op)
     // use strong references, in case the generator or frame object is
     // resurrected by a finalizer.
     if (PyGen_CheckExact(op) || PyCoro_CheckExact(op) || PyAsyncGen_CheckExact(op)) {
-        frame_disable_deferred_refcounting(((PyGenObject *)op)->gi_live_frame);
+        frame_disable_deferred_refcounting(&((PyGenObject *)op)->gi_iframe);
     }
     else if (PyFrame_Check(op)) {
         frame_disable_deferred_refcounting(((PyFrameObject *)op)->f_frame);
