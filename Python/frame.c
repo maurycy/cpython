@@ -52,8 +52,8 @@ _PyFrame_MakeAndSetFrameObject(_PyControlRecord *frame, _PyInterpreterDataFrame 
     return f;
 }
 
-static void
-take_ownership(PyFrameObject *f, _PyControlRecord *frame, _PyInterpreterDataFrame *fp)
+void
+_PyFrame_TakeOwnership(PyFrameObject *f, _PyControlRecord *frame, _PyInterpreterDataFrame *fp)
 {
     Py_BEGIN_CRITICAL_SECTION(f);
     assert(frame->owner < FRAME_OWNED_BY_INTERPRETER);
@@ -124,7 +124,7 @@ _PyFrame_ClearExceptCode(_PyControlRecord *frame, _PyInterpreterDataFrame *fp)
     if (f != NULL) {
         FT_ATOMIC_STORE_PTR_RELAXED(fp->frame_obj, NULL);
         if (!_PyObject_IsUniquelyReferenced((PyObject *)f)) {
-            take_ownership(f, frame, fp);
+            _PyFrame_TakeOwnership(f, frame, fp);
             Py_DECREF(f);
             return;
         }

@@ -2077,18 +2077,31 @@ clear_thread_frame(PyThreadState *tstate, _PyControlRecord *frame,
     // push frames, and they must not see or be charged for the dying frame.
     // A frame object, if any, takes its copy of the record while it is live.
     PyFrameObject *f = FT_ATOMIC_LOAD_PTR_RELAXED(fp->frame_obj);
-    if (f != NULL) {
-        frame->state = CONTROL_RESERVED;
-        _PyThreadState_AdjustControlLimit(tstate, 1);
-        _PyFrame_ClearExceptCode(frame, fp);
-        PyStackRef_CLEAR(frame->f_executable);
-        _PyThreadState_PopFrame(tstate, frame, fp);
-        _PyThreadState_AdjustControlLimit(tstate, -1);
-        return;
-    }
     _PyStackRef executable = frame->f_executable;
     _PyStackRef *sp = frame->stackpointer;
-    _PyThreadState_PopControl(tstate, frame);
+    if (f != NULL) {
+        FT_ATOMIC_STORE_PTR_RELAXED(fp->frame_obj, NULL);
+        if (!_PyObject_IsUniquelyReferenced((PyObject *)f)) {
+            // The frame object outlives the frame: it copies the record and
+            // the locals while both are still on the stacks (it needs the
+            // caller for f_back), which runs no Python code. Pop afterwards,
+            // then drop our reference; the object stays alive elsewhere.
+            _PyFrame_TakeOwnership(f, frame, fp);
+            _PyThreadState_PopControl(tstate, frame);
+            Py_DECREF(f);
+            PyStackRef_CLOSE(executable);
+            _PyThreadState_PopDataFrame(tstate, fp);
+            return;
+        }
+        // The frame object dies with the frame. Its deallocation and the
+        // locals' finalizers may run Python, so pop the record first; the
+        // deallocator never dereferences f_frame of a frame it does not own.
+        _PyThreadState_PopControl(tstate, frame);
+        Py_DECREF(f);
+    }
+    else {
+        _PyThreadState_PopControl(tstate, frame);
+    }
     _PyStackRef *locals = fp->localsplus;
     while (sp > locals) {
         sp--;

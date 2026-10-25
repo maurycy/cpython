@@ -389,6 +389,13 @@ _PyFrame_ClearLocals(_PyControlRecord *frame, _PyInterpreterDataFrame *fp);
  PyAPI_FUNC(void)
 _PyFrame_ClearExceptCode(_PyControlRecord *frame, _PyInterpreterDataFrame *fp);
 
+/* Copy a dying frame into the frame object that outlives it. Runs no Python
+   code; the record must still be on the control stack (f_back needs the
+   caller). */
+PyAPI_FUNC(void)
+_PyFrame_TakeOwnership(PyFrameObject *f, _PyControlRecord *frame,
+                       _PyInterpreterDataFrame *fp);
+
 int
 _PyFrame_Traverse(_PyControlRecord *frame, _PyInterpreterDataFrame *fp,
                   visitproc visit, void *arg);
