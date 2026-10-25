@@ -1284,10 +1284,27 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
 #endif
 #endif
     _PyControlRecord *entry = frame - 1;
+#ifdef DUALSTACK_ENTRY_SHIFT
+    /* Diagnostic build: place the entry data at one of eight 64-byte
+       aligned positions chosen by $DUALSTACK_ENTRY_SHIFT, so its address
+       can be moved without moving anything else in this C frame. */
+    static int dualstack_entry_shift = -1;
+    if (dualstack_entry_shift < 0) {
+        const char *e = getenv("DUALSTACK_ENTRY_SHIFT");
+        dualstack_entry_shift = e ? (atoi(e) & 7) : 0;
+    }
+    _Alignas(64) struct _entry_data_s {
+        _PyInterpreterDataFrame data;
+        _PyStackRef result;
+    } entry_data_arr[8];
+    struct _entry_data_s *entry_data_p = &entry_data_arr[dualstack_entry_shift];
+#define entry_data (*entry_data_p)
+#else
     struct {
         _PyInterpreterDataFrame data;
         _PyStackRef result;
     } entry_data;
+#endif
     _PyInterpreterDataFrame *fp = frame->data;
 
     if (_Py_EnterRecursiveCallTstate(tstate, "")) {
