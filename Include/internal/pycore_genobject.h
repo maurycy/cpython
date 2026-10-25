@@ -56,6 +56,11 @@ _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, 
     memcpy(&w2, (const char *)&gen->gi_iframe + 16, 8);
     memcpy(&w3, (const char *)&gen->gi_iframe + 24, 8);
     memcpy(&w4, (const char *)&gen->gi_iframe + 32, 8);
+    /* Keep the five words in general registers: the LTO build merged
+       these loads into 16-byte vector loads, which cannot be forwarded
+       from the 8-byte stores the last suspend made to the same fields
+       (four store-to-load interlocks per resume). */
+    __asm__("" : "+r"(w0), "+r"(w1), "+r"(w2), "+r"(w3), "+r"(w4));
     _PyStackRef *sp = (_PyStackRef *)(uintptr_t)w2;
     if (value != NULL) {
         *sp++ = *value;

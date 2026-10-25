@@ -596,6 +596,9 @@ gen_try_set_executing(PyGenObject *gen)
    continue with the delegate, so one dispatch reaches the innermost frame.
    Each level still gets its own control record. Returns the innermost
    record, which is the one to run. */
+#if defined(__GNUC__) && !defined(__clang__)
+__attribute__((optimize("no-tree-slp-vectorize")))
+#endif
 static inline _PyControlRecord *
 _PyGen_PushFrameChain(PyThreadState *tstate, PyGenObject *gen, _PyStackRef value)
 {
