@@ -1307,14 +1307,8 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
     entry_data->f_builtins = (PyObject*)0xaaa4;
 #endif
     /* The entry's data lives on the data stack; keep a native stack anchor
-       for out-of-process readers in the otherwise unused f_locals slot.
-       Taking the address of a register variable would pin it to memory, so
-       use the frame address. */
-#if defined(__GNUC__) || defined(__clang__)
-    entry_data->f_locals = (PyObject *)__builtin_frame_address(0);
-#else
-    entry_data->f_locals = (PyObject *)&entry;
-#endif
+       for out-of-process readers in the otherwise unused f_locals slot. */
+    entry_data->f_locals = (PyObject *)&next_instr;
     entry->f_executable = PyStackRef_None;
     entry->instr_ptr = (_Py_CODEUNIT *)_Py_INTERPRETER_TRAMPOLINE_INSTRUCTIONS + 1;
     entry->stackpointer = entry_data->localsplus + 1;
