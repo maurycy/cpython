@@ -4790,10 +4790,28 @@ dummy_func(
             assert(_PyFrame_GetBytecode(shim)[1].op.code == RETURN_VALUE);
             /* Push self onto stack of shim */
             shim->data->localsplus[0] = PyStackRef_DUP(self);
-            _PyThreadState_AdjustControlLimit(tstate, 1);
-            _PyControlRecord *temp = _PyEvalFramePushAndInit(
-                tstate, init, NULL, args-1, oparg+1, NULL);
-            _PyThreadState_AdjustControlLimit(tstate, -1);
+            PyCodeObject *init_code = (PyCodeObject *)((PyFunctionObject *)PyStackRef_AsPyObjectBorrow(init))->func_code;
+            _PyControlRecord *temp;
+            if (init_code->co_argcount == oparg + 1 &&
+                init_code->co_kwonlyargcount == 0 &&
+                (init_code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0)
+            {
+                /* Exact positional __init__: bind self and the arguments
+                   straight into the frame. Stack space for both frames was
+                   checked by _CHECK_AND_ALLOCATE_OBJECT. */
+                temp = _PyFrame_PushUnchecked(tstate, init, oparg + 1);
+                _PyStackRef *locals = temp->data->localsplus;
+                locals[0] = self;
+                for (int i = 0; i < oparg; i++) {
+                    locals[1 + i] = args[i];
+                }
+            }
+            else {
+                /* Positional binding cannot run Python, so the shim record
+                   needs no recursion-limit adjustment around it. */
+                temp = _PyEvalFramePushAndInit(
+                    tstate, init, NULL, args-1, oparg+1, NULL);
+            }
             DEAD(init);
             DEAD(self);
             DEAD(args);
