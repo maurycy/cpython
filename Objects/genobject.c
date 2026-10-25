@@ -258,8 +258,8 @@ gen_raise_already_executing_error(PyGenObject *gen)
 // returned value.
 // The generator must be in the FRAME_EXECUTING state when this function
 // is called.
-static PySendResult
-gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
+static PySendResultPair
+gen_send_ex2_pair(PyGenObject *gen, PyObject *arg, int exc)
 {
     assert(FT_ATOMIC_LOAD_INT8_RELAXED(gen->gi_frame_state) == FRAME_EXECUTING);
 
@@ -287,8 +287,7 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
         }
         FT_ATOMIC_STORE_INT8_RELEASE(gen->gi_frame_state, FRAME_CLEARED);
         gen_clear_frame(gen);
-        *presult = NULL;
-        return PYGEN_ERROR;
+        return (PySendResultPair){NULL, PYGEN_ERROR};
     }
 
     _PyErr_StackItem *prev_exc_info = tstate->exc_info;
@@ -322,8 +321,7 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
 #ifndef Py_GIL_DISABLED
         assert(FRAME_STATE_SUSPENDED(gen->gi_frame_state));
 #endif
-        *presult = result;
-        return PYGEN_NEXT;
+        return (PySendResultPair){result, PYGEN_NEXT};
     }
 
     assert(return_kind == GENERATOR_RETURN);
@@ -345,16 +343,22 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
             !PyErr_ExceptionMatches(PyExc_StopAsyncIteration));
     }
 
-    *presult = result;
-    return result ? PYGEN_RETURN : PYGEN_ERROR;
+    return (PySendResultPair){result, result ? PYGEN_RETURN : PYGEN_ERROR};
+}
+
+static PySendResult
+gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
+{
+    PySendResultPair pair = gen_send_ex2_pair(gen, arg, exc);
+    *presult = pair.object;
+    return pair.kind;
 }
 
 // Set the generator 'gen' to the executing state and send 'arg' into it.
 // See gen_send_ex2() for details.
-static PySendResult
-gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
+static PySendResultPair
+gen_send_pair(PyGenObject *gen, PyObject *arg)
 {
-    *presult = NULL;
     int8_t frame_state = FT_ATOMIC_LOAD_INT8_RELAXED(gen->gi_frame_state);
     do {
         if (frame_state == FRAME_CREATED && arg && arg != Py_None) {
@@ -368,11 +372,11 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
                         "just-started async generator";
             }
             PyErr_SetString(PyExc_TypeError, msg);
-            return PYGEN_ERROR;
+            return (PySendResultPair){NULL, PYGEN_ERROR};
         }
         if (frame_state == FRAME_EXECUTING) {
             gen_raise_already_executing_error(gen);
-            return PYGEN_ERROR;
+            return (PySendResultPair){NULL, PYGEN_ERROR};
         }
         if (FRAME_STATE_FINISHED(frame_state)) {
             if (PyCoro_CheckExact(gen)) {
@@ -386,17 +390,34 @@ gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
             else if (arg) {
                 /* `gen` is an exhausted generator:
                 only return value if called from send(). */
-                *presult = Py_None;
-                return PYGEN_RETURN;
+                return (PySendResultPair){Py_None, PYGEN_RETURN};
             }
-            return PYGEN_ERROR;
+            return (PySendResultPair){NULL, PYGEN_ERROR};
         }
 
         assert((frame_state == FRAME_CREATED) ||
                FRAME_STATE_SUSPENDED(frame_state));
     } while (!_Py_GEN_TRY_SET_FRAME_STATE(gen, frame_state, FRAME_EXECUTING));
 
-    return gen_send_ex2(gen, arg, presult, 0);
+    return gen_send_ex2_pair(gen, arg, 0);
+}
+
+static PySendResult
+gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
+{
+    PySendResultPair pair = gen_send_pair(gen, arg);
+    *presult = pair.object;
+    return pair.kind;
+}
+
+/* Resume an exact generator or coroutine with None. The result travels
+   in registers instead of through an out-parameter on the caller's
+   C stack. */
+PySendResultPair
+_PyGen_SendNone(PyObject *self)
+{
+    assert(PyGen_CheckExact(self) || PyCoro_CheckExact(self));
+    return gen_send_pair(_PyGen_CAST(self), Py_None);
 }
 
 static PySendResult

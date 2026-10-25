@@ -8,6 +8,7 @@ extern "C" {
 #  error "this header requires Py_BUILD_CORE define"
 #endif
 
+#include "pycore_abstract.h"      // PySendResultPair
 #include "pycore_frame.h"         // FRAME_STATE_FINISHED()
 #include "pycore_interpframe.h"
 #include "pycore_tstate.h"        // _PyThreadStateImpl
@@ -214,6 +215,9 @@ extern int _PyGen_ClearFrame(PyGenObject *self);
 
 // Export for '_asyncio' shared extension
 PyAPI_FUNC(int) _PyGen_SetStopIterationValue(PyObject *);
+
+// Export for '_asyncio' shared extension
+PyAPI_FUNC(PySendResultPair) _PyGen_SendNone(PyObject *gen);
 
 // Export for '_asyncio' shared extension
 PyAPI_FUNC(int) _PyGen_FetchStopIterationValue(PyObject **);
