@@ -2170,7 +2170,7 @@ _PyEval_MakeGeneratorInPlace(PyThreadState *tstate, _PyStackRef callable,
     gen_frame->state = CONTROL_DETACHED;
     _PyStackRef *first_non_self_local = gen_data->localsplus + has_self;
     if (has_self) {
-        gen_data->localsplus[0] = self_or_null;
+        gen_data->localsplus[0] = PyStackRef_MakeHeapSafe(self_or_null);
     }
     for (int i = 0; i < oparg; i++) {
         first_non_self_local[i] = PyStackRef_MakeHeapSafe(args[i]);
@@ -2306,6 +2306,7 @@ _PyEval_Vector(PyThreadState *tstate, PyFunctionObject *func,
 {
     PyCodeObject *code = (PyCodeObject *)func->func_code;
     if (kwnames == NULL && locals == NULL && argcount <= 8 &&
+        tstate->interp->eval_frame == NULL &&
         argcount == (size_t)code->co_argcount &&
         code->co_kwonlyargcount == 0 &&
         (code->co_flags & (CO_VARARGS | CO_VARKEYWORDS)) == 0 &&
