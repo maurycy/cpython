@@ -1512,7 +1512,10 @@ commit_control_stack(PyThreadState *tstate, size_t size)
 static int
 allocate_control_stack(PyThreadState *tstate)
 {
-    size_t size = SIZEOF_VOID_P > 4 ? (size_t)1 << 30 : (size_t)1 << 24;
+#ifndef _PY_CONTROLSTACK_RESERVE_SHIFT
+#define _PY_CONTROLSTACK_RESERVE_SHIFT 30
+#endif
+    size_t size = SIZEOF_VOID_P > 4 ? (size_t)1 << _PY_CONTROLSTACK_RESERVE_SHIFT : (size_t)1 << 24;
     void *base;
 #ifdef MS_WINDOWS
     base = VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS);
