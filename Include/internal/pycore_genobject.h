@@ -33,22 +33,25 @@ _PyGen_FinalizerIsNoop(PyObject *op)
 PyAPI_FUNC(void) _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state);
 PyAPI_FUNC(void) _PyGen_UnlinkFrame(PyGenObject *gen, _PyControlRecord *frame);
 #else
-/* gi_iframe is a complete DETACHED record, so restoring is one struct copy.
-   The stack pointer is kept in a register across the copy so pushing the
-   sent value does not reload it from the bytes just written. */
+/* gi_iframe is a complete DETACHED record. Restoring it reads every field
+   into registers before the first store: the saved record lives on the
+   heap and the slot on the control stack, and when the two share the low
+   12 bits of their addresses, a load issued after a store to the other
+   location waits for that store to retire (4K aliasing). */
 static inline void
 _PyGen_LinkFrame(PyGenObject *gen, _PyControlRecord *frame, _PyStackRef *value, int state)
 {
     assert(gen->gi_iframe.state == CONTROL_DETACHED);
     assert(gen->gi_iframe.data == &gen->gi_data);
     assert(gen->gi_iframe.owner == FRAME_OWNED_BY_GENERATOR);
-    _PyStackRef *sp = gen->gi_iframe.stackpointer;
-    *frame = gen->gi_iframe;
-    frame->state = (uint8_t)state;
+    _PyControlRecord saved = gen->gi_iframe;
+    _PyStackRef *sp = saved.stackpointer;
     if (value != NULL) {
         *sp++ = *value;
-        frame->stackpointer = sp;
+        saved.stackpointer = sp;
     }
+    saved.state = (uint8_t)state;
+    *frame = saved;
     PyFrameObject *f = gen->gi_data.frame_obj;
     if (f != NULL) {
         f->f_frame = frame;
