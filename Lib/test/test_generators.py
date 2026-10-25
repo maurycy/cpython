@@ -901,6 +901,104 @@ class GeneratorThrowTest(unittest.TestCase):
 
 class GeneratorStackTraceTest(unittest.TestCase):
 
+    def test_frame_across_resumes(self):
+        caller = None
+
+        def child():
+            self.assertIs(sys._getframe().f_back, frame)
+            gc.collect()
+
+        def generator():
+            for step in range(3):
+                self.assertIs(sys._getframe(), frame)
+                self.assertIs(gen.gi_frame, frame)
+                self.assertIs(frame.f_back, caller)
+                child()
+                try:
+                    yield step
+                except LookupError:
+                    self.assertEqual(step, 1)
+            return frame
+
+        def resume(method, *args):
+            nonlocal caller
+            caller = sys._getframe()
+            return method(*args)
+
+        gen = generator()
+        frame = gen.gi_frame
+        self.assertEqual(resume(gen.__next__), 0)
+        self.assertIsNone(frame.f_back)
+        self.assertEqual(resume(gen.__next__), 1)
+        self.assertIsNone(frame.f_back)
+        self.assertEqual(resume(gen.throw, LookupError), 2)
+        self.assertIsNone(frame.f_back)
+        with self.assertRaises(StopIteration) as cm:
+            resume(gen.__next__)
+        self.assertIs(cm.exception.value, frame)
+        self.assertIsNone(gen.gi_frame)
+        self.assertIsNone(frame.f_back)
+        self.assertEqual(frame.f_locals['step'], 2)
+
+    def test_interleaved_delegated_frames(self):
+        caller = None
+
+        def delegate(depth):
+            if depth:
+                yield from delegate(depth - 1)
+            else:
+                for _ in range(3):
+                    frame = sys._getframe()
+                    for _ in range(5):
+                        self.assertEqual(frame.f_code.co_name, 'delegate')
+                        frame = frame.f_back
+                    self.assertIs(frame, caller)
+                    gc.collect()
+                    yield
+
+        def resume(gen):
+            nonlocal caller
+            caller = sys._getframe()
+            next(gen)
+
+        generators = [delegate(4), delegate(4)]
+        frames = [gen.gi_frame for gen in generators]
+        for _ in range(3):
+            for gen, frame in zip(generators, frames):
+                resume(gen)
+                self.assertIs(gen.gi_frame, frame)
+                self.assertIsNone(frame.f_back)
+        for gen, frame in zip(generators, frames):
+            gen.close()
+            self.assertIsNone(gen.gi_frame)
+            self.assertIsNone(frame.f_back)
+
+    def test_finalizer_resumes_another_generator(self):
+        finalized = []
+
+        def other():
+            while True:
+                gc.collect()
+                yield sys._getframe().f_back.f_code.co_name
+
+        other_gen = other()
+
+        class Payload:
+            def __del__(self):
+                finalized.append(next(other_gen))
+
+        def generator():
+            payload = Payload()
+            yield
+
+        for _ in range(3):
+            gen = generator()
+            next(gen)
+            self.assertIsNone(next(gen, None))
+            self.assertIsNone(gen.gi_frame)
+        self.assertEqual(finalized, ['__del__'] * 3)
+        other_gen.close()
+
     def check_stack_names(self, frame, expected):
         names = []
         while frame:

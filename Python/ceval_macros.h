@@ -226,7 +226,7 @@ do { \
         _PyFrame_StackPointerValidate(frame);                    \
         assert(_PyFrame_GetPrevious(NEW_FRAME) == frame);                  \
         frame = tstate->current_frame = (NEW_FRAME);             \
-        frame->state = CONTROL_ACTIVE;                          \
+        _PyFrame_SetState(frame, CONTROL_ACTIVE);                \
         fp = frame->data;                                       \
         CALL_STAT_INC(inlined_py_calls);                         \
         JUMP_TO_LABEL(start_frame);                              \

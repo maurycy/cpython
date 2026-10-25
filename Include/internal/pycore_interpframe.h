@@ -18,6 +18,46 @@ extern "C" {
 #define _PyControlRecord_LASTI(IF) \
     ((int)((IF)->instr_ptr - _PyFrame_GetBytecode((IF))))
 
+static inline PyGenObject *
+_PyGen_GetGeneratorFromFrame(_PyInterpreterDataFrame *frame)
+{
+    return (PyGenObject *)((char *)frame - offsetof(PyGenObject, gi_data));
+}
+
+/* Generator execution state stays in gi_iframe. Its control-stack slot
+   identifies the activation through data, owner and state. */
+static inline _PyControlRecord *
+_PyFrame_FromControlSlot(_PyControlRecord *slot)
+{
+    if (slot->owner == FRAME_OWNED_BY_GENERATOR) {
+        return &_PyGen_GetGeneratorFromFrame(slot->data)->gi_iframe;
+    }
+    return slot;
+}
+
+static inline _PyControlRecord *
+_PyFrame_GetControlSlot(_PyControlRecord *frame)
+{
+    if (frame->owner == FRAME_OWNED_BY_GENERATOR) {
+        PyGenObject *gen = (PyGenObject *)((char *)frame
+            - offsetof(PyGenObject, gi_iframe));
+        assert(frame->data == &gen->gi_data);
+        return gen->gi_control_slot;
+    }
+    return frame;
+}
+
+static inline void
+_PyFrame_SetState(_PyControlRecord *frame, uint8_t state)
+{
+    if (frame->owner == FRAME_OWNED_BY_GENERATOR) {
+        _PyControlRecord *slot = _PyFrame_GetControlSlot(frame);
+        assert(slot != NULL);
+        slot->state = state;
+    }
+    frame->state = state;
+}
+
 static inline PyCodeObject *_PyFrame_GetCode(_PyControlRecord *f) {
     assert(!PyStackRef_IsNull(f->f_executable));
     PyObject *executable = PyStackRef_AsPyObjectBorrow(f->f_executable);
@@ -300,10 +340,11 @@ static inline _PyControlRecord *
 _PyFrame_GetCaller(_PyControlRecord *frame)
 {
     assert(frame->state != CONTROL_DETACHED && frame->state != CONTROL_BASE);
+    _PyControlRecord *slot = _PyFrame_GetControlSlot(frame);
     do {
-        --frame;
-    } while (frame->state < CONTROL_ACTIVE);
-    return frame;
+        --slot;
+    } while (slot->state < CONTROL_ACTIVE);
+    return _PyFrame_FromControlSlot(slot);
 }
 
 static inline _PyControlRecord *

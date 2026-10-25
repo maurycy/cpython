@@ -74,7 +74,8 @@ struct _PyControlRecord {
     PyObject *prefix##_qualname;                                            \
     _PyErr_StackItem prefix##_exc_state;                                    \
     PyObject *prefix##_origin_or_finalizer;                                 \
-    struct _PyControlRecord *prefix##_live_frame;                           \
+    /* Active control-stack slot, or NULL while suspended. */              \
+    struct _PyControlRecord *prefix##_control_slot;                         \
     int8_t prefix##_hooks_inited;                                           \
     int8_t prefix##_closed;                                                 \
     int8_t prefix##_running_async;                                          \

@@ -719,11 +719,12 @@ PyEval_EvalFrameEx(PyFrameObject *f, int throwflag)
 {
     PyThreadState *tstate = _PyThreadState_GET();
     _PyControlRecord *frame = f->f_frame;
+    _PyControlRecord *slot = _PyFrame_GetControlSlot(frame);
     if (tstate->controlstack_top < tstate->base_frame + 3 ||
-        frame != tstate->controlstack_top - 1 ||
+        slot != tstate->controlstack_top - 1 ||
         frame->state != CONTROL_RESERVED ||
-        (frame - 1)->state != CONTROL_RESERVED ||
-        (frame - 1)->owner != FRAME_OWNED_BY_INTERPRETER)
+        (slot - 1)->state != CONTROL_RESERVED ||
+        (slot - 1)->owner != FRAME_OWNED_BY_INTERPRETER)
     {
         PyErr_SetString(PyExc_RuntimeError, "frame is not ready for evaluation");
         return NULL;
@@ -1283,7 +1284,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
     uint8_t dispatch_code;
 #endif
 #endif
-    _PyControlRecord *entry = frame - 1;
+    _PyControlRecord *entry = _PyFrame_GetControlSlot(frame) - 1;
     struct {
         _PyInterpreterDataFrame data;
         _PyStackRef result;
@@ -1324,7 +1325,7 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyControlRecord *frame, int thr
 #endif
     /* Push frame */
     entry->state = CONTROL_ACTIVE;
-    frame->state = CONTROL_ACTIVE;
+    _PyFrame_SetState(frame, CONTROL_ACTIVE);
     tstate->current_frame = frame;
     entry_data.data.localsplus[0] = PyStackRef_NULL;
 #ifdef _Py_TIER2
@@ -2091,7 +2092,7 @@ clear_gen_frame(PyThreadState *tstate, _PyControlRecord *frame,
     assert(tstate->exc_info == &gen->gi_exc_state);
     tstate->exc_info = gen->gi_exc_state.previous_item;
     gen->gi_exc_state.previous_item = NULL;
-    frame->state = CONTROL_DETACHED;
+    _PyFrame_SetState(frame, CONTROL_DETACHED);
     _PyThreadState_AdjustControlLimit(tstate, 1);
     Py_BEGIN_CRITICAL_SECTION(gen);
     assert(fp->frame_obj == NULL || fp->frame_obj->f_frame == frame);

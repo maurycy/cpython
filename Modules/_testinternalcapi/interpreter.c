@@ -59,7 +59,7 @@ Test_EvalFrame(PyThreadState *tstate, _PyControlRecord *frame, int throwflag)
     uint8_t dispatch_code;
 #endif
 #endif
-    _PyControlRecord *entry = frame - 1;
+    _PyControlRecord *entry = _PyFrame_GetControlSlot(frame) - 1;
     struct {
         _PyInterpreterDataFrame data;
         _PyStackRef result;
@@ -100,7 +100,7 @@ Test_EvalFrame(PyThreadState *tstate, _PyControlRecord *frame, int throwflag)
 #endif
     /* Push frame */
     entry->state = CONTROL_ACTIVE;
-    frame->state = CONTROL_ACTIVE;
+    _PyFrame_SetState(frame, CONTROL_ACTIVE);
     tstate->current_frame = frame;
     entry_data.data.localsplus[0] = PyStackRef_NULL;
 

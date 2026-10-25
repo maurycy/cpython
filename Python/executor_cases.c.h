@@ -17497,7 +17497,7 @@
             _PyFrame_StackPointerValidate(frame);
             assert(_PyFrame_GetCaller(temp) == frame || _PyFrame_GetCaller(_PyFrame_GetCaller(temp)) == frame);
             CALL_STAT_INC(inlined_py_calls);
-            temp->state = CONTROL_ACTIVE;
+            _PyFrame_SetState(temp, CONTROL_ACTIVE);
             frame = tstate->current_frame = temp;
             fp = frame->data;
             stack_pointer = _PyFrame_GetStackPointer(frame);
