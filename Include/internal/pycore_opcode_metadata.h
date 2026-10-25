@@ -199,7 +199,7 @@ int _PyOpcode_num_popped(int opcode, int oparg)  {
         case ENTER_EXECUTOR:
             return 0;
         case EXIT_INIT_CHECK:
-            return 1;
+            return 2;
         case EXTENDED_ARG:
             return 0;
         case FORMAT_SIMPLE:
@@ -696,7 +696,7 @@ int _PyOpcode_num_pushed(int opcode, int oparg)  {
         case ENTER_EXECUTOR:
             return 0;
         case EXIT_INIT_CHECK:
-            return 0;
+            return 1;
         case EXTENDED_ARG:
             return 0;
         case FORMAT_SIMPLE:
@@ -1184,7 +1184,7 @@ const struct opcode_metadata _PyOpcode_opcode_metadata[267] = {
     [END_FOR] = { true, INSTR_FMT_IX, HAS_ESCAPES_FLAG | HAS_NO_SAVE_IP_FLAG },
     [END_SEND] = { true, INSTR_FMT_IX, HAS_ESCAPES_FLAG | HAS_PURE_FLAG },
     [ENTER_EXECUTOR] = { true, INSTR_FMT_IB, HAS_ARG_FLAG },
-    [EXIT_INIT_CHECK] = { true, INSTR_FMT_IX, HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG },
+    [EXIT_INIT_CHECK] = { true, INSTR_FMT_IX, HAS_ERROR_FLAG | HAS_ERROR_NO_POP_FLAG | HAS_ESCAPES_FLAG | HAS_SYNC_SP_FLAG | HAS_NEEDS_GUARD_IP_FLAG },
     [EXTENDED_ARG] = { true, INSTR_FMT_IB, HAS_ARG_FLAG },
     [FORMAT_SIMPLE] = { true, INSTR_FMT_IX, HAS_ERROR_FLAG | HAS_ESCAPES_FLAG },
     [FORMAT_WITH_SPEC] = { true, INSTR_FMT_IX, HAS_ERROR_FLAG | HAS_ESCAPES_FLAG },
@@ -1433,7 +1433,7 @@ _PyOpcode_macro_expansion[256] = {
     [DICT_UPDATE] = { .nuops = 2, .uops = { { _DICT_UPDATE, OPARG_SIMPLE, 0 }, { _POP_TOP, OPARG_SIMPLE, 0 } } },
     [END_FOR] = { .nuops = 1, .uops = { { _END_FOR, OPARG_SIMPLE, 0 } } },
     [END_SEND] = { .nuops = 1, .uops = { { _END_SEND, OPARG_SIMPLE, 0 } } },
-    [EXIT_INIT_CHECK] = { .nuops = 1, .uops = { { _EXIT_INIT_CHECK, OPARG_SIMPLE, 0 } } },
+    [EXIT_INIT_CHECK] = { .nuops = 3, .uops = { { _EXIT_INIT_CHECK, OPARG_SIMPLE, 0 }, { _MAKE_HEAP_SAFE, OPARG_SIMPLE, 0 }, { _RETURN_VALUE, OPARG_SIMPLE, 0 } } },
     [FORMAT_SIMPLE] = { .nuops = 1, .uops = { { _FORMAT_SIMPLE, OPARG_SIMPLE, 0 } } },
     [FORMAT_WITH_SPEC] = { .nuops = 1, .uops = { { _FORMAT_WITH_SPEC, OPARG_SIMPLE, 0 } } },
     [FOR_ITER] = { .nuops = 2, .uops = { { _RECORD_NOS_TYPE, OPARG_SIMPLE, 0 }, { _FOR_ITER, OPARG_REPLACED, 0 } } },

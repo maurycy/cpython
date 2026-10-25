@@ -6261,17 +6261,64 @@
             next_instr += 1;
             INSTRUCTION_STATS(EXIT_INIT_CHECK);
             _PyStackRef should_be_none;
-            should_be_none = stack_pointer[-1];
-            if (!PyStackRef_IsNone(should_be_none)) {
-                _PyFrame_SetStackPointer(frame, stack_pointer);
-                _PyFrame_StackPointerValidate(frame);
-                PyErr_Format(PyExc_TypeError,
+            _PyStackRef value;
+            _PyStackRef retval;
+            _PyStackRef res;
+            // _EXIT_INIT_CHECK
+            {
+                should_be_none = stack_pointer[-1];
+                if (!PyStackRef_IsNone(should_be_none)) {
+                    _PyFrame_SetStackPointer(frame, stack_pointer);
+                    _PyFrame_StackPointerValidate(frame);
+                    PyErr_Format(PyExc_TypeError,
                              "__init__() should return None, not '%.200s'",
                              Py_TYPE(PyStackRef_AsPyObjectBorrow(should_be_none))->tp_name);
-                _PyFrame_StackPointerInvalidate(frame);
-                JUMP_TO_LABEL(error);
+                    _PyFrame_StackPointerInvalidate(frame);
+                    JUMP_TO_LABEL(error);
+                }
             }
-            stack_pointer += -1;
+            // _MAKE_HEAP_SAFE
+            {
+                value = stack_pointer[-2];
+                value = PyStackRef_MakeHeapSafe(value);
+            }
+            // _RETURN_VALUE
+            {
+                retval = value;
+                assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
+                _PyStackRef temp = retval;
+                #ifdef Py_GIL_DISABLED
+                _PyCStackRef return_ref;
+                _PyThreadState_PushCStackRef(tstate, &return_ref);
+                return_ref.ref = temp;
+                #endif
+                stack_pointer += -2;
+                ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
+                _PyFrame_SetStackPointer(frame, stack_pointer);
+                _PyFrame_StackPointerValidate(frame);
+                assert(STACK_LEVEL() == 0);
+                DTRACE_FUNCTION_RETURN();
+                _PyControlRecord *dying = frame;
+                frame = tstate->current_frame = _PyFrame_GetCaller(dying);
+                _PyEval_FrameClearAndPop(tstate, dying, fp);
+                fp = frame->data;
+                stack_pointer = _PyFrame_GetStackPointer(frame);
+                _PyFrame_StackPointerInvalidate(frame);
+                LOAD_IP(frame->return_offset);
+                #ifdef Py_DEBUG
+                int return_kind = ((_PyThreadStateImpl *)tstate)->generator_return_kind;
+                #endif
+                LLTRACE_RESUME_FRAME();
+                #ifdef Py_DEBUG
+                ((_PyThreadStateImpl *)tstate)->generator_return_kind = return_kind;
+                #endif
+                #ifdef Py_GIL_DISABLED
+                temp = _PyThreadState_PopCStackRefSteal(tstate, &return_ref);
+                #endif
+                res = temp;
+            }
+            stack_pointer[0] = res;
+            stack_pointer += 1;
             ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
             DISPATCH();
         }

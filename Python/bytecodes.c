@@ -4816,7 +4816,7 @@ dummy_func(
             _CREATE_INIT_FRAME +
             _PUSH_FRAME;
 
-        inst(EXIT_INIT_CHECK, (should_be_none -- )) {
+        op(_EXIT_INIT_CHECK, (should_be_none -- )) {
             if (!PyStackRef_IsNone(should_be_none)) {
                 PyErr_Format(PyExc_TypeError,
                     "__init__() should return None, not '%.200s'",
@@ -4825,6 +4825,15 @@ dummy_func(
             }
             DEAD(should_be_none);
         }
+
+        /* The __init__ cleanup shim is EXIT_INIT_CHECK followed by
+           RETURN_VALUE of self. Fuse the two so the shim returns in one
+           dispatch; the RETURN_VALUE in the shim's code is kept for the
+           error path and for anything that inspects the code object. */
+        macro(EXIT_INIT_CHECK) =
+            _EXIT_INIT_CHECK +
+            _MAKE_HEAP_SAFE +
+            _RETURN_VALUE;
 
         op(_GUARD_CALLABLE_BUILTIN_CLASS, (callable, unused, unused[oparg] -- callable, unused, unused[oparg])) {
             PyObject *callable_o = PyStackRef_AsPyObjectBorrow(callable);
