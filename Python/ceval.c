@@ -1273,7 +1273,20 @@ _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int 
     uint8_t dispatch_code;
 #endif
 #endif
+#ifdef DUALSTACK_ENTRY_SHIFT
+    /* Diagnostic: move the C-stack entry frame in 64-byte steps chosen by
+       $DUALSTACK_ENTRY_SHIFT without moving anything else in this frame. */
+    static int dualstack_entry_shift = -1;
+    if (dualstack_entry_shift < 0) {
+        const char *e = getenv("DUALSTACK_ENTRY_SHIFT");
+        dualstack_entry_shift = e ? (atoi(e) & 7) : 0;
+    }
+    _Alignas(64) _PyEntryFrame entry_arr[8];
+    _PyEntryFrame *entry_p = &entry_arr[dualstack_entry_shift];
+#define entry (*entry_p)
+#else
     _PyEntryFrame entry;
+#endif
 
     if (_Py_EnterRecursiveCallTstate(tstate, "")) {
         assert(frame->owner != FRAME_OWNED_BY_INTERPRETER);
