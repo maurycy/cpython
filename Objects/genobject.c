@@ -268,7 +268,16 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
 
     /* Push arg onto the frame's value stack */
     PyObject *arg_obj = arg ? arg : Py_None;
-    _PyFrame_StackPush(frame, PyStackRef_FromPyObjectNew(arg_obj));
+    _Py_CODEUNIT *skip = NULL;
+    if (arg_obj == Py_None) {
+        skip = _PyGen_SkipDiscardedResume(tstate, frame);
+    }
+    if (skip != NULL) {
+        frame->instr_ptr = skip;
+    }
+    else {
+        _PyFrame_StackPush(frame, PyStackRef_FromPyObjectNew(arg_obj));
+    }
 
     _PyErr_StackItem *prev_exc_info = tstate->exc_info;
     gen->gi_exc_state.previous_item = prev_exc_info;

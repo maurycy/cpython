@@ -682,8 +682,6 @@ enum {
     _FORMAT_SIMPLE_r11,
     _FORMAT_WITH_SPEC_r21,
     _FOR_ITER_r23,
-    _FOR_ITER_GEN_FRAME_r03,
-    _FOR_ITER_GEN_FRAME_r13,
     _FOR_ITER_GEN_FRAME_r23,
     _FOR_ITER_TIER_TWO_r23,
     _FOR_ITER_VIRTUAL_r23,
@@ -1444,7 +1442,7 @@ enum {
     _WITH_EXCEPT_START_r33,
     _YIELD_VALUE_r11,
 };
-#define MAX_UOP_REGS_ID 1655
+#define MAX_UOP_REGS_ID 1653
 
 #ifdef __cplusplus
 }
