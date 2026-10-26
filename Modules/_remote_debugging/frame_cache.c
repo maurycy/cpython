@@ -167,12 +167,21 @@ read_last_profiled_anchor(RemoteUnwinderObject *unwinder,
     // remote-memory read.
     if (seq_offset == frame_offset + sizeof(uintptr_t)) {
         uintptr_t live_anchor[2];
+#if defined(__APPLE__) && TARGET_OS_OSX
+        if (_Py_RemoteDebug_AliasedRead(unwinder,
+                                        thread_state_addr + frame_offset,
+                                        sizeof(live_anchor),
+                                        live_anchor) < 0) {
+            return -1;
+        }
+#else
         if (_Py_RemoteDebug_ReadRemoteMemory(&unwinder->handle,
                                              thread_state_addr + frame_offset,
                                              sizeof(live_anchor),
                                              live_anchor) < 0) {
             return -1;
         }
+#endif
         anchor->frame = live_anchor[0];
         anchor->seq = live_anchor[1];
         return 0;
