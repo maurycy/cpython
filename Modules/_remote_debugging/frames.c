@@ -21,6 +21,19 @@ cleanup_stack_chunks(StackChunkList *chunks)
 }
 
 static int
+read_stack_chunk(proc_handle_t *handle, uintptr_t addr, size_t size, void *out)
+{
+#if defined(__APPLE__) && TARGET_OS_OSX
+    if (!handle->alias_cache.disabled) {
+        // Read stack chunks directly to avoid validating cached VM aliases
+        // on every chunk read.
+        return _Py_RemoteDebug_ReadRemoteMemory(handle, addr, size, out);
+    }
+#endif
+    return _Py_RemoteDebug_PagedReadRemoteMemory(handle, addr, size, out);
+}
+
+static int
 process_single_stack_chunk(
     RemoteUnwinderObject *unwinder,
     uintptr_t chunk_addr,
@@ -36,7 +49,7 @@ process_single_stack_chunk(
         return -1;
     }
 
-    if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, chunk_addr, current_size, this_chunk) < 0) {
+    if (read_stack_chunk(&unwinder->handle, chunk_addr, current_size, this_chunk) < 0) {
         PyMem_RawFree(this_chunk);
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read stack chunk");
         return -1;
@@ -65,7 +78,7 @@ process_single_stack_chunk(
         }
         this_chunk = tmp;
 
-        if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, chunk_addr, actual_size, this_chunk) < 0) {
+        if (read_stack_chunk(&unwinder->handle, chunk_addr, actual_size, this_chunk) < 0) {
             PyMem_RawFree(this_chunk);
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to reread stack chunk with correct size");
             return -1;
