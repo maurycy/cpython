@@ -408,7 +408,6 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
     }
     self->vm_max_address = 0;
 #if defined(__APPLE__) && TARGET_OS_OSX
-    _Py_RemoteDebug_AliasCacheInit(self);
     task_vm_info_data_t vm_info;
     mach_msg_type_number_t vm_count = TASK_VM_INFO_COUNT;
     if (task_info(self->handle.task, TASK_VM_INFO,
@@ -419,8 +418,8 @@ _remote_debugging_RemoteUnwinder___init___impl(RemoteUnwinderObject *self,
         if (vm_info.page_size > 0
             && (vm_info.page_size & (vm_info.page_size - 1)) == 0
             && (size_t)vm_info.page_size != (size_t)self->handle.page_size) {
-            self->alias_cache.disabled = 1;
-            _Py_RemoteDebug_AliasCacheClear(self);
+            self->handle.alias_cache.disabled = 1;
+            _Py_RemoteDebug_AliasCacheClear(&self->handle);
         }
     }
 #endif
@@ -1410,9 +1409,6 @@ RemoteUnwinder_dealloc(PyObject *op)
     if (self->tlbc_cache) {
         _Py_hashtable_destroy(self->tlbc_cache);
     }
-#endif
-#if defined(__APPLE__) && TARGET_OS_OSX
-    _Py_RemoteDebug_AliasCacheClear(self);
 #endif
     if (self->handle.pid != 0) {
         _Py_RemoteDebug_ClearCache(&self->handle);

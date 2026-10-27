@@ -271,31 +271,6 @@ typedef struct {
     uintptr_t frame_addr;
 } RemoteReadPrefetch;
 
-#if defined(__APPLE__) && TARGET_OS_OSX
-#define MAX_ALIAS_PAGES 256
-#define ALIAS_PROBE_DEFAULT_MASK 0x3ff
-#define ALIAS_PROBE_MIN_MASK 0x3f
-#define ALIAS_PROBE_MAX_MASK 0x3fff
-
-typedef struct {
-    uintptr_t remote_page_base;
-    mach_vm_address_t local_page_base;
-    uint64_t access_seq;
-    int valid;
-    uint64_t map_objid;
-    uint64_t map_offset;
-} AliasPageEntry;
-
-typedef struct {
-    AliasPageEntry pages[MAX_ALIAS_PAGES];
-    mach_vm_address_t region_base;
-    uint64_t access_seq;
-    uint32_t probe_counter;
-    uint32_t probe_mask;
-    int disabled;
-} AliasReadCache;
-#endif
-
 /* Statistics for profiling performance analysis */
 typedef struct {
     uint64_t total_samples;                  // Total number of get_stack_trace calls
@@ -426,9 +401,6 @@ typedef struct {
 #ifdef __APPLE__
     uint64_t thread_id_offset;
     int thread_id_offset_initialized;
-#  if TARGET_OS_OSX
-    AliasReadCache alias_cache;
-#  endif
 #endif
 #ifdef MS_WINDOWS
     PVOID win_process_buffer;
@@ -712,8 +684,6 @@ extern int _Py_RemoteDebug_AliasedRead(
     uintptr_t remote_addr,
     size_t len,
     void *dst);
-extern void _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder);
-extern void _Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder);
 #endif
 
 /* ============================================================================

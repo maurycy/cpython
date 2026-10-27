@@ -4485,6 +4485,43 @@ recurse({depth})
 
         self.assertEqual(stats["total_samples"], 1)
 
+    @unittest.skipUnless(sys.platform == "darwin", "macOS alias cache")
+    def test_alias_cache_lifetime(self):
+        script_body = """\
+            def target():
+                sock.sendall(b"ready")
+                sock.recv(16)
+
+            target()
+            """
+
+        with self._target_process(script_body) as (p, client_socket, _):
+            _wait_for_signal(client_socket, b"ready")
+            for _ in range(3):
+                unwinder = RemoteUnwinder(
+                    p.pid, all_threads=True, cache_frames=True, stats=True
+                )
+                stats = unwinder.get_stats()
+                self.assertEqual(stats["alias_hits"], 0)
+                self.assertEqual(stats["alias_misses"], 0)
+
+                for _ in range(2):
+                    trace = unwinder.get_stack_trace()
+                    self.assertIsNotNone(self._find_frame_in_trace(
+                        trace, lambda frame: frame.funcname == "target"
+                    ))
+
+                stats = unwinder.get_stats()
+                self.assertEqual(stats["total_samples"], 2)
+                if (stats["alias_hits"] == 0 and
+                        stats["alias_misses"] == stats["alias_remap_failures"]):
+                    self.skipTest("Aliased reads are unavailable")
+                self.assertGreater(stats["alias_hits"], 0)
+                self.assertGreater(stats["alias_misses"], 0)
+                del unwinder
+
+            client_socket.sendall(b"done")
+
     @skip_if_not_supported
     @unittest.skipIf(
         sys.platform == "linux" and not PROCESS_VM_READV_SUPPORTED,

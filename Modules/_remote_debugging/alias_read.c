@@ -45,7 +45,7 @@ alias_invalidate_entry(AliasPageEntry *entry)
 static AliasPageEntry *
 alias_find_entry(RemoteUnwinderObject *unwinder, uintptr_t page_base)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
+    AliasReadCache *cache = &unwinder->handle.alias_cache;
     for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
         AliasPageEntry *entry = &cache->pages[i];
         if (entry->valid && entry->remote_page_base == page_base) {
@@ -55,48 +55,28 @@ alias_find_entry(RemoteUnwinderObject *unwinder, uintptr_t page_base)
     return NULL;
 }
 
-void
-_Py_RemoteDebug_AliasCacheClear(RemoteUnwinderObject *unwinder)
-{
-    AliasReadCache *cache = &unwinder->alias_cache;
-    for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
-        alias_invalidate_entry(&cache->pages[i]);
-    }
-    if (cache->region_base != 0) {
-        mach_vm_size_t region_size =
-            (mach_vm_size_t)MAX_ALIAS_PAGES *
-            (mach_vm_size_t)unwinder->handle.page_size;
-        (void)mach_vm_deallocate(mach_task_self(), cache->region_base,
-                                 region_size);
-        cache->region_base = 0;
-    }
-}
-
 static void
 alias_disable_runtime(RemoteUnwinderObject *unwinder)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
+    AliasReadCache *cache = &unwinder->handle.alias_cache;
     cache->disabled = 1;
-    _Py_RemoteDebug_AliasCacheClear(unwinder);
+    _Py_RemoteDebug_AliasCacheClear(&unwinder->handle);
 }
 
-void
-_Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
+static int
+alias_reserve_window(proc_handle_t *handle)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
-    memset(cache, 0, sizeof(*cache));
-    cache->probe_mask = ALIAS_PROBE_DEFAULT_MASK;
-
+    AliasReadCache *cache = &handle->alias_cache;
     mach_vm_size_t region_size =
         (mach_vm_size_t)MAX_ALIAS_PAGES *
-        (mach_vm_size_t)unwinder->handle.page_size;
+        (mach_vm_size_t)handle->page_size;
     kern_return_t kr = mach_vm_allocate(mach_task_self(),
                                         &cache->region_base,
                                         region_size,
                                         VM_FLAGS_ANYWHERE);
     if (kr != KERN_SUCCESS) {
         cache->disabled = 1;
-        return;
+        return -1;
     }
     kr = mach_vm_protect(mach_task_self(), cache->region_base, region_size,
                          FALSE, VM_PROT_NONE);
@@ -105,15 +85,16 @@ _Py_RemoteDebug_AliasCacheInit(RemoteUnwinderObject *unwinder)
                                  region_size);
         cache->region_base = 0;
         cache->disabled = 1;
-        return;
+        return -1;
     }
+    return 0;
 }
 
 static int
 alias_maybe_probe_entry(RemoteUnwinderObject *unwinder,
                         AliasPageEntry *entry)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
+    AliasReadCache *cache = &unwinder->handle.alias_cache;
     if ((++cache->probe_counter & cache->probe_mask) != 0) {
         return 1;
     }
@@ -147,7 +128,7 @@ alias_maybe_probe_entry(RemoteUnwinderObject *unwinder,
 static AliasPageEntry *
 alias_alloc_entry(RemoteUnwinderObject *unwinder)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
+    AliasReadCache *cache = &unwinder->handle.alias_cache;
     AliasPageEntry *oldest = NULL;
 
     for (int i = 0; i < MAX_ALIAS_PAGES; i++) {
@@ -171,7 +152,7 @@ alias_map_readonly_page(RemoteUnwinderObject *unwinder,
                         uintptr_t page_base,
                         AliasPageEntry *entry)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
+    AliasReadCache *cache = &unwinder->handle.alias_cache;
     mach_vm_size_t page_size = (mach_vm_size_t)unwinder->handle.page_size;
     mach_vm_address_t local_addr =
         cache->region_base + (entry - cache->pages) * page_size;
@@ -210,7 +191,7 @@ alias_remap_page(RemoteUnwinderObject *unwinder,
                  uintptr_t page_base,
                  AliasPageEntry **entry_out)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
+    AliasReadCache *cache = &unwinder->handle.alias_cache;
     AliasPageEntry *entry = alias_alloc_entry(unwinder);
     kern_return_t kr = alias_map_readonly_page(unwinder, page_base, entry);
     if (kr != KERN_SUCCESS) {
@@ -245,7 +226,7 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
                             size_t len,
                             void *dst)
 {
-    AliasReadCache *cache = &unwinder->alias_cache;
+    AliasReadCache *cache = &unwinder->handle.alias_cache;
     if (len == 0) {
         return 1;
     }
@@ -261,6 +242,15 @@ _Py_RemoteDebug_AliasedRead(RemoteUnwinderObject *unwinder,
     uintptr_t page_base = remote_addr & ~(uintptr_t)(page_size - 1);
     size_t offset = (size_t)(remote_addr - page_base);
     if (offset >= page_size || len > page_size - offset) {
+        if (_Py_RemoteDebug_ReadRemoteMemory(
+                &unwinder->handle, remote_addr, len, dst) < 0) {
+            return -1;
+        }
+        return 1;
+    }
+
+    if (cache->region_base == 0 &&
+        alias_reserve_window(&unwinder->handle) < 0) {
         if (_Py_RemoteDebug_ReadRemoteMemory(
                 &unwinder->handle, remote_addr, len, dst) < 0) {
             return -1;
