@@ -8,6 +8,7 @@ import sys
 import socket
 import threading
 import time
+import types
 from contextlib import contextmanager
 from asyncio import staggered, taskgroups, base_events, tasks
 from unittest.mock import ANY
@@ -587,6 +588,54 @@ class TestSelfStackTrace(RemoteInspectionTestBase):
         self.assertEqual(stacks["anext"], ["agen"])
 
     @skip_if_not_supported
+    def test_generator_awaitable_stack_is_not_truncated(self):
+        def wait():
+            yield from asyncio.get_running_loop().create_future()
+
+        class Awaitable:
+            def __await__(self):
+                return (yield from wait())
+
+        async def inner():
+            await asyncio.sleep(10_000)
+
+        @types.coroutine
+        def legacy():
+            yield from inner()
+
+        async def consumer(aw):
+            await aw
+
+        async def main():
+            await_task = asyncio.create_task(
+                consumer(Awaitable()), name="__await__")
+            legacy_task = asyncio.create_task(
+                consumer(legacy()), name="types.coroutine")
+            await asyncio.sleep(0)
+            return RemoteUnwinder(os.getpid()).get_all_awaited_by()
+
+        stacks = self._extract_coroutine_funcnames(asyncio.run(main()))
+        self.assertEqual(stacks["__await__"], ["wait", "__await__", "consumer"])
+        self.assertEqual(stacks["types.coroutine"],
+                         ["sleep", "inner", "legacy", "consumer"])
+
+    @skip_if_not_supported
+    def test_generator_awaitable_running_task_stack(self):
+        class Awaitable:
+            def __await__(self):
+                return RemoteUnwinder(os.getpid()).get_async_stack_trace()
+                yield
+
+        async def consumer():
+            return await Awaitable()
+
+        async def main():
+            return await asyncio.create_task(consumer(), name="consumer")
+
+        stacks = self._extract_coroutine_funcnames(asyncio.run(main()))
+        self.assertEqual(stacks["consumer"], ["__await__", "consumer"])
+
+    @skip_if_not_supported
     def test_class_named_like_async_generator_wrapper_is_not_walked(self):
         # gh-159620
         async def decoy():
@@ -851,6 +900,35 @@ class TestGetStackTrace(RemoteInspectionTestBase):
                 f"{[(f.filename, f.funcname) for f in frames]}",
             )
             self.assertEqual(target.filename, script_name)
+
+    @skip_if_not_supported
+    @unittest.skipIf(
+        sys.platform == "linux" and not PROCESS_VM_READV_SUPPORTED,
+        "Test only runs on Linux with process_vm_readv support",
+    )
+    def test_remote_stack_trace_invalid_unicode_name(self):
+        import_module("_testinternalcapi")
+
+        script = textwrap.dedent("""\
+            import os
+            import _remote_debugging
+            import _testinternalcapi
+
+            def func():
+                return _remote_debugging.RemoteUnwinder(os.getpid()).get_stack_trace()
+
+            name = _testinternalcapi.new_invalid_str()
+            func.__code__ = func.__code__.replace(co_qualname=name)
+            print(func())
+            """)
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            timeout=SHORT_TIMEOUT,
+        )
+        self.assertEqual(result.returncode, 0, result)
+        self.assertIn("<unknown function>", result.stdout)
 
     @skip_if_not_supported
     @unittest.skipIf(
@@ -4470,13 +4548,6 @@ recurse({depth})
             "batched_read_misses",
             "batched_read_segments_requested",
             "batched_read_segments_completed",
-            "alias_hits",
-            "alias_misses",
-            "alias_remap_failures",
-            "alias_validation_fails",
-            "alias_evictions",
-            "alias_probe_checks",
-            "alias_probe_recycles",
             "batched_read_success_rate",
             "batched_read_segment_completion_rate",
         ]
@@ -4484,43 +4555,6 @@ recurse({depth})
             self.assertIn(key, stats)
 
         self.assertEqual(stats["total_samples"], 1)
-
-    @unittest.skipUnless(sys.platform == "darwin", "macOS alias cache")
-    def test_alias_cache_lifetime(self):
-        script_body = """\
-            def target():
-                sock.sendall(b"ready")
-                sock.recv(16)
-
-            target()
-            """
-
-        with self._target_process(script_body) as (p, client_socket, _):
-            _wait_for_signal(client_socket, b"ready")
-            for _ in range(3):
-                unwinder = RemoteUnwinder(
-                    p.pid, all_threads=True, cache_frames=True, stats=True
-                )
-                stats = unwinder.get_stats()
-                self.assertEqual(stats["alias_hits"], 0)
-                self.assertEqual(stats["alias_misses"], 0)
-
-                for _ in range(2):
-                    trace = unwinder.get_stack_trace()
-                    self.assertIsNotNone(self._find_frame_in_trace(
-                        trace, lambda frame: frame.funcname == "target"
-                    ))
-
-                stats = unwinder.get_stats()
-                self.assertEqual(stats["total_samples"], 2)
-                if (stats["alias_hits"] == 0 and
-                        stats["alias_misses"] == stats["alias_remap_failures"]):
-                    self.skipTest("Aliased reads are unavailable")
-                self.assertGreater(stats["alias_hits"], 0)
-                self.assertGreater(stats["alias_misses"], 0)
-                del unwinder
-
-            client_socket.sendall(b"done")
 
     @skip_if_not_supported
     @unittest.skipIf(
@@ -4569,6 +4603,19 @@ class TestMetadataDegradation(RemoteInspectionTestBase):
         )
         self.assertIsNotNone(frame)
         self.assertEqual(frame.funcname, "f" * 1024)
+
+    def test_long_qualname_truncated_to_narrower_kind(self):
+        name = "a" * 1024 + "\U00010300"
+        src = f"def {name}(sample):\n    return sample()\n"
+        ns = {}
+        exec(src, ns)
+
+        trace = ns[name](RemoteUnwinder(os.getpid()).get_stack_trace)
+        frame = self._find_frame_in_trace(
+            trace, lambda f: f.funcname.startswith("aaa")
+        )
+        self.assertIsNotNone(frame)
+        self.assertEqual(frame.funcname, "a" * 1024)
 
     def test_long_filename_truncated(self):
         """A filename longer than 1024 chars is truncated instead of

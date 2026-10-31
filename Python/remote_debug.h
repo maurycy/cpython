@@ -167,37 +167,11 @@ typedef struct page_cache_entry {
 
 #define MAX_PAGES 1024
 
-#if defined(__APPLE__) && defined(TARGET_OS_OSX) && TARGET_OS_OSX
-#define MAX_ALIAS_PAGES 256
-#define ALIAS_PROBE_DEFAULT_MASK 0x3ff
-#define ALIAS_PROBE_MIN_MASK 0x3f
-#define ALIAS_PROBE_MAX_MASK 0x3fff
-
-typedef struct {
-    uintptr_t remote_page_base;
-    mach_vm_address_t local_page_base;
-    uint64_t access_seq;
-    int valid;
-    uint64_t map_objid;
-    uint64_t map_offset;
-} AliasPageEntry;
-
-typedef struct {
-    AliasPageEntry pages[MAX_ALIAS_PAGES];
-    mach_vm_address_t region_base;
-    uint64_t access_seq;
-    uint32_t probe_counter;
-    uint32_t probe_mask;
-    int disabled;
-} AliasReadCache;
-#endif
-
 // Define a platform-independent process handle structure
 typedef struct {
     pid_t pid;
 #if defined(__APPLE__) && defined(TARGET_OS_OSX) && TARGET_OS_OSX
     mach_port_t task;
-    AliasReadCache alias_cache;
 #elif defined(MS_WINDOWS)
     HANDLE hProcess;
 #elif defined(__linux__)
@@ -258,20 +232,6 @@ _Py_RemoteDebug_ClearCache(proc_handle_t *handle)
 }
 
 #if defined(__APPLE__) && defined(TARGET_OS_OSX) && TARGET_OS_OSX
-static void
-_Py_RemoteDebug_AliasCacheClear(proc_handle_t *handle)
-{
-    AliasReadCache *cache = &handle->alias_cache;
-    memset(cache->pages, 0, sizeof(cache->pages));
-    if (cache->region_base != 0) {
-        mach_vm_size_t region_size =
-            (mach_vm_size_t)MAX_ALIAS_PAGES * (mach_vm_size_t)handle->page_size;
-        (void)mach_vm_deallocate(mach_task_self(), cache->region_base,
-                                region_size);
-        cache->region_base = 0;
-    }
-}
-
 static mach_port_t pid_to_task(pid_t pid);
 #endif
 
@@ -281,8 +241,6 @@ _Py_RemoteDebug_InitProcHandle(proc_handle_t *handle, pid_t pid) {
     handle->pid = 0;
 #if defined(__APPLE__) && defined(TARGET_OS_OSX) && TARGET_OS_OSX
     handle->task = 0;
-    memset(&handle->alias_cache, 0, sizeof(handle->alias_cache));
-    handle->alias_cache.probe_mask = ALIAS_PROBE_DEFAULT_MASK;
 #elif defined(MS_WINDOWS)
     handle->hProcess = NULL;
 #elif defined(__linux__)
@@ -319,9 +277,7 @@ _Py_RemoteDebug_InitProcHandle(proc_handle_t *handle, pid_t pid) {
 // Clean up the process handle
 UNUSED static void
 _Py_RemoteDebug_CleanupProcHandle(proc_handle_t *handle) {
-#if defined(__APPLE__) && defined(TARGET_OS_OSX) && TARGET_OS_OSX
-    _Py_RemoteDebug_AliasCacheClear(handle);
-#elif defined(MS_WINDOWS)
+#ifdef MS_WINDOWS
     if (handle->hProcess != NULL) {
         CloseHandle(handle->hProcess);
         handle->hProcess = NULL;

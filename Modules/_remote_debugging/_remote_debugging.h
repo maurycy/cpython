@@ -289,13 +289,6 @@ typedef struct {
     uint64_t batched_read_misses;            // Attempts that fell back or partially read
     uint64_t batched_read_segments_requested; // Segments requested by batched reads
     uint64_t batched_read_segments_completed; // Segments completed by batched reads
-    uint64_t alias_hits;                     // macOS alias-cache hits
-    uint64_t alias_misses;                   // macOS alias-cache misses
-    uint64_t alias_remap_failures;           // macOS remap/protect failures
-    uint64_t alias_validation_fails;         // macOS alias snapshot validation failures
-    uint64_t alias_evictions;                // macOS alias-cache LRU evictions
-    uint64_t alias_probe_checks;             // macOS alias object identity probes
-    uint64_t alias_probe_recycles;           // macOS alias recycled-page detections
 } UnwinderStats;
 
 #if defined(__GNUC__) || defined(__clang__)
@@ -365,9 +358,6 @@ typedef struct {
     proc_handle_t handle;
     uintptr_t runtime_start_address;
     struct _Py_DebugOffsets debug_offsets;
-    size_t interp_window_start;
-    size_t interp_window_size;
-    uintptr_t vm_max_address;
     int async_debug_offsets_available;
     struct _Py_AsyncioModuleDebugOffsets async_debug_offsets;
     uintptr_t interpreter_addr;
@@ -667,25 +657,6 @@ extern int collect_frames_with_cache(
     FrameWalkContext *ctx,
     uint64_t thread_id);
 
-#if defined(__APPLE__) && TARGET_OS_OSX
-
-extern int _Py_RemoteDebug_ValidateThreadStateSnapshot(
-    RemoteUnwinderObject *unwinder,
-    const char *tstate_buffer,
-    uintptr_t tstate_addr,
-    uintptr_t current_interpreter
-);
-/* Returns 0 if bytes were served from an aliased page snapshot (callers
- * should validate), 1 if no snapshot was involved (live syscall read or
- * zero-length no-op; skip validation), -1 on error with an exception
- * set. */
-extern int _Py_RemoteDebug_AliasedRead(
-    RemoteUnwinderObject *unwinder,
-    uintptr_t remote_addr,
-    size_t len,
-    void *dst);
-#endif
-
 /* ============================================================================
  * THREAD FUNCTION DECLARATIONS
  * ============================================================================ */
@@ -714,7 +685,6 @@ extern int get_thread_status(RemoteUnwinderObject *unwinder, uint64_t tid, uint6
 
 extern PyObject* unwind_stack_for_thread(
     RemoteUnwinderObject *unwinder,
-    uintptr_t current_interpreter,
     uintptr_t *current_tstate,
     uintptr_t gil_holder_tstate,
     uintptr_t gc_frame,

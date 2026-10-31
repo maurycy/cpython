@@ -296,7 +296,6 @@ typedef struct {
 static int
 read_thread_state_and_maybe_frame(
     RemoteUnwinderObject *unwinder,
-    uintptr_t current_interpreter,
     uintptr_t tstate_addr,
     size_t tstate_size,
     char *tstate_buffer,
@@ -305,28 +304,6 @@ read_thread_state_and_maybe_frame(
     int *frame_read)
 {
     *frame_read = 0;
-#if defined(__APPLE__) && TARGET_OS_OSX
-    if (unwinder->cache_frames) {
-        int rc = _Py_RemoteDebug_AliasedRead(
-            unwinder,
-            tstate_addr,
-            tstate_size,
-            tstate_buffer);
-        if (rc < 0) {
-            return -1;
-        }
-        if (rc == 0 && !_Py_RemoteDebug_ValidateThreadStateSnapshot(
-                unwinder, tstate_buffer, tstate_addr,
-                current_interpreter)) {
-            STATS_INC(unwinder, alias_validation_fails);
-            return _Py_RemoteDebug_ReadRemoteMemory(
-                &unwinder->handle, tstate_addr, tstate_size, tstate_buffer);
-        }
-        return 0;
-    }
-#else
-    (void)current_interpreter;
-#endif
     if (predicted_frame_addr != 0) {
         _Py_RemoteReadSegment segments[2] = {
             {tstate_addr, tstate_buffer, tstate_size},
@@ -354,16 +331,12 @@ read_thread_state_and_maybe_frame(
 PyObject*
 unwind_stack_for_thread(
     RemoteUnwinderObject *unwinder,
-    uintptr_t current_interpreter,
     uintptr_t *current_tstate,
     uintptr_t gil_holder_tstate,
     uintptr_t gc_frame,
     uintptr_t main_thread_tstate,
     const RemoteReadPrefetch *prefetch
 ) {
-#if !defined(__APPLE__) || !TARGET_OS_OSX
-    (void)current_interpreter;
-#endif
     PyObject *frame_info = NULL;
     PyObject *thread_id = NULL;
     PyObject *result = NULL;
@@ -390,7 +363,6 @@ unwind_stack_for_thread(
 
         int rc = read_thread_state_and_maybe_frame(
             unwinder,
-            current_interpreter,
             *current_tstate,
             (size_t)unwinder->debug_offsets.thread_state.size,
             local_ts,
