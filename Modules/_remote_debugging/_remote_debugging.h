@@ -557,7 +557,7 @@ typedef struct {
 
 extern void tlbc_cache_entry_destroy(void *ptr);
 extern TLBCCacheEntry *get_tlbc_cache_entry(RemoteUnwinderObject *self, uintptr_t code_addr, uint32_t current_generation);
-extern int cache_tlbc_array(RemoteUnwinderObject *unwinder, uintptr_t code_addr, uintptr_t tlbc_array_addr, uint32_t generation);
+extern TLBCCacheEntry *cache_tlbc_array(RemoteUnwinderObject *unwinder, uintptr_t code_addr, uintptr_t tlbc_array_addr, uint32_t generation);
 #endif
 
 /* ============================================================================

@@ -43,7 +43,7 @@ get_tlbc_cache_entry(RemoteUnwinderObject *self, uintptr_t code_addr, uint32_t c
     return entry;
 }
 
-int
+TLBCCacheEntry *
 cache_tlbc_array(RemoteUnwinderObject *unwinder, uintptr_t code_addr, uintptr_t tlbc_array_addr, uint32_t generation)
 {
     uintptr_t tlbc_array_ptr;
@@ -53,31 +53,31 @@ cache_tlbc_array(RemoteUnwinderObject *unwinder, uintptr_t code_addr, uintptr_t 
     // Read the TLBC array pointer
     if (read_ptr(unwinder, tlbc_array_addr, &tlbc_array_ptr) != 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read TLBC array pointer");
-        return 0; // Read error
+        return NULL; // Read error
     }
 
     // Validate TLBC array pointer
     if (tlbc_array_ptr == 0) {
         PyErr_SetString(PyExc_RuntimeError, "TLBC array pointer is NULL");
-        return 0; // No TLBC array
+        return NULL; // No TLBC array
     }
 
     // Read the TLBC array size
     Py_ssize_t tlbc_size;
     if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, tlbc_array_ptr, sizeof(tlbc_size), &tlbc_size) != 0) {
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read TLBC array size");
-        return 0; // Read error
+        return NULL; // Read error
     }
 
     // Validate TLBC array size
     if (tlbc_size <= 0) {
         PyErr_SetString(PyExc_RuntimeError, "Invalid TLBC array size");
-        return 0; // Invalid size
+        return NULL; // Invalid size
     }
 
     if (tlbc_size > MAX_TLBC_SIZE) {
         PyErr_SetString(PyExc_RuntimeError, "TLBC array size exceeds maximum limit");
-        return 0; // Invalid size
+        return NULL; // Invalid size
     }
     assert(tlbc_size > 0 && tlbc_size <= MAX_TLBC_SIZE);
 
@@ -87,13 +87,13 @@ cache_tlbc_array(RemoteUnwinderObject *unwinder, uintptr_t code_addr, uintptr_t 
     if (!tlbc_array) {
         PyErr_NoMemory();
         set_exception_cause(unwinder, PyExc_MemoryError, "Failed to allocate TLBC array");
-        return 0; // Memory error
+        return NULL; // Memory error
     }
 
     if (_Py_RemoteDebug_PagedReadRemoteMemory(&unwinder->handle, tlbc_array_ptr, sizeof(Py_ssize_t) + array_data_size, tlbc_array) != 0) {
         PyMem_RawFree(tlbc_array);
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to read TLBC array data");
-        return 0; // Read error
+        return NULL; // Read error
     }
 
     // Create cache entry
@@ -102,7 +102,7 @@ cache_tlbc_array(RemoteUnwinderObject *unwinder, uintptr_t code_addr, uintptr_t 
         PyErr_NoMemory();
         PyMem_RawFree(tlbc_array);
         set_exception_cause(unwinder, PyExc_MemoryError, "Failed to allocate TLBC cache entry");
-        return 0; // Memory error
+        return NULL; // Memory error
     }
 
     entry->tlbc_array = tlbc_array;
@@ -115,10 +115,10 @@ cache_tlbc_array(RemoteUnwinderObject *unwinder, uintptr_t code_addr, uintptr_t 
         tlbc_cache_entry_destroy(entry);
         PyErr_NoMemory();
         set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to store TLBC entry in cache");
-        return 0; // Cache error
+        return NULL; // Cache error
     }
 
-    return 1; // Success
+    return entry;
 }
 
 #endif
@@ -470,14 +470,17 @@ parse_code_object(RemoteUnwinderObject *unwinder,
 
     if (!tlbc_entry) {
         // Cache miss - try to read and cache TLBC array
-        if (!cache_tlbc_array(unwinder, real_address, real_address + unwinder->debug_offsets.code_object.co_tlbc, unwinder->tlbc_generation)) {
+        tlbc_entry = cache_tlbc_array(
+            unwinder, real_address,
+            real_address + unwinder->debug_offsets.code_object.co_tlbc,
+            unwinder->tlbc_generation);
+        if (!tlbc_entry) {
             set_exception_cause(unwinder, PyExc_RuntimeError, "Failed to cache TLBC array");
             goto error;
         }
-        tlbc_entry = get_tlbc_cache_entry(unwinder, real_address, unwinder->tlbc_generation);
     }
 
-    if (tlbc_entry && ctx->tlbc_index >= 0) {
+    if (ctx->tlbc_index >= 0) {
         uintptr_t *entries = (uintptr_t *)((char *)tlbc_entry->tlbc_array + sizeof(Py_ssize_t));
         if (ctx->tlbc_index >= tlbc_entry->tlbc_array_size ||
             entries[ctx->tlbc_index] == 0) {
@@ -485,38 +488,37 @@ parse_code_object(RemoteUnwinderObject *unwinder,
             if (old != NULL) {
                 tlbc_cache_entry_destroy(old);
             }
-            if (!cache_tlbc_array(unwinder, real_address, real_address + unwinder->debug_offsets.code_object.co_tlbc,
-                                unwinder->tlbc_generation)) {
+            tlbc_entry = cache_tlbc_array(
+                unwinder, real_address,
+                real_address + unwinder->debug_offsets.code_object.co_tlbc,
+                unwinder->tlbc_generation);
+            if (!tlbc_entry) {
                 goto error;
             }
-            tlbc_entry = get_tlbc_cache_entry(unwinder, real_address, unwinder->tlbc_generation);
         }
     }
 
-    // Validate tlbc_index and check TLBC cache
-    if (tlbc_entry) {
-        // Validate index bounds (also catches negative values since tlbc_index is signed)
-        if (ctx->tlbc_index < 0 || ctx->tlbc_index >= tlbc_entry->tlbc_array_size) {
-            PyErr_Format(PyExc_RuntimeError,
-                "Invalid tlbc_index %d (array size %zd, corrupted remote memory)",
-                ctx->tlbc_index, tlbc_entry->tlbc_array_size);
-            set_exception_cause(unwinder, PyExc_RuntimeError,
-                "Invalid tlbc_index (corrupted remote memory)");
-            goto error;
-        }
-        assert(tlbc_entry->tlbc_array_size > 0);
-        // Use cached TLBC data
-        uintptr_t *entries = (uintptr_t *)((char *)tlbc_entry->tlbc_array + sizeof(Py_ssize_t));
-        uintptr_t tlbc_bytecode_addr = entries[ctx->tlbc_index];
+    // Validate index bounds (also catches negative values since tlbc_index is signed)
+    if (ctx->tlbc_index < 0 || ctx->tlbc_index >= tlbc_entry->tlbc_array_size) {
+        PyErr_Format(PyExc_RuntimeError,
+            "Invalid tlbc_index %d (array size %zd, corrupted remote memory)",
+            ctx->tlbc_index, tlbc_entry->tlbc_array_size);
+        set_exception_cause(unwinder, PyExc_RuntimeError,
+            "Invalid tlbc_index (corrupted remote memory)");
+        goto error;
+    }
+    assert(tlbc_entry->tlbc_array_size > 0);
+    // Use cached TLBC data
+    uintptr_t *entries = (uintptr_t *)((char *)tlbc_entry->tlbc_array + sizeof(Py_ssize_t));
+    uintptr_t tlbc_bytecode_addr = entries[ctx->tlbc_index];
 
-        if (tlbc_bytecode_addr != 0) {
-            // Calculate offset from TLBC bytecode
-            addrq = (uint16_t *)ip - (uint16_t *)tlbc_bytecode_addr;
-            goto done_tlbc;
-        }
+    if (tlbc_bytecode_addr != 0) {
+        // Calculate offset from TLBC bytecode
+        addrq = (uint16_t *)ip - (uint16_t *)tlbc_bytecode_addr;
+        goto done_tlbc;
     }
 
-    // Fall back to main bytecode (no tlbc_entry or tlbc_bytecode_addr was 0)
+    // Fall back to main bytecode if the TLBC slot is empty
     addrq = (uint16_t *)ip - (uint16_t *)meta->addr_code_adaptive;
 
 done_tlbc:
