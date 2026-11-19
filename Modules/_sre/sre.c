@@ -1385,10 +1385,10 @@ pattern_subx(_sremodulestate* module_state,
              Py_ssize_t subn)
 {
     SRE_STATE state;
-    PyObject* list;
-    PyObject* joiner;
+    PyObject* list = NULL;
     PyObject* item;
     PyObject* filter;
+    PyBytesWriter *writer = NULL;
     PyObject* match;
     const void* ptr;
     Py_ssize_t status;
@@ -1444,13 +1444,6 @@ pattern_subx(_sremodulestate* module_state,
         return NULL;
     }
 
-    list = PyList_New(0);
-    if (!list) {
-        Py_DECREF(filter);
-        state_fini(&state);
-        return NULL;
-    }
-
     n = i = 0;
 
     while (!count || n < count) {
@@ -1472,6 +1465,32 @@ pattern_subx(_sremodulestate* module_state,
 
         b = STATE_OFFSET(&state, state.start);
         e = STATE_OFFSET(&state, state.ptr);
+
+        if (n == 0) {
+            /* With one full match, join can reuse the replacement itself. */
+            if (filter_type == LITERAL && PyBytes_CheckExact(string) &&
+                PyBytes_CheckExact(filter) && (b != 0 || e != state.endpos))
+            {
+                writer = PyBytesWriter_Create(0);
+                if (writer == NULL)
+                    goto error;
+            }
+            else {
+                list = PyList_New(0);
+                if (list == NULL)
+                    goto error;
+            }
+        }
+        if (writer != NULL) {
+            if (PyBytesWriter_WriteBytes(writer, PyBytes_AS_STRING(string) + i,
+                                         b - i) < 0 ||
+                PyBytesWriter_WriteBytes(writer, PyBytes_AS_STRING(filter),
+                                         PyBytes_GET_SIZE(filter)) < 0)
+            {
+                goto error;
+            }
+            goto next_match;
+        }
 
         if (i < b) {
             /* get segment before this match */
@@ -1513,6 +1532,7 @@ pattern_subx(_sremodulestate* module_state,
                 goto error;
         }
 
+next_match:
         i = e;
         n = n + 1;
         state.must_advance = (state.ptr == state.start);
@@ -1520,7 +1540,18 @@ pattern_subx(_sremodulestate* module_state,
     }
 
     /* get segment following last match */
-    if (i < state.endpos) {
+    if (writer != NULL) {
+        if (PyBytesWriter_WriteBytes(writer, PyBytes_AS_STRING(string) + i,
+                                     state.endpos - i) < 0) {
+            goto error;
+        }
+        item = PyBytesWriter_Finish(writer);
+    }
+    else if (list == NULL) {
+        /* No matches. */
+        item = getslice(state.isbytes, state.beginning, string, 0, state.endpos);
+    }
+    else if (i < state.endpos) {
         item = getslice(state.isbytes, state.beginning,
                         string, i, state.endpos);
         if (!item)
@@ -1534,25 +1565,20 @@ pattern_subx(_sremodulestate* module_state,
 
     Py_DECREF(filter);
 
-    /* convert list to single string (also removes list) */
-    joiner = getslice(state.isbytes, state.beginning, string, 0, 0);
-    if (!joiner) {
+    if (list != NULL) {
+        PyObject *joiner = getslice(state.isbytes, state.beginning, string, 0, 0);
+        if (joiner == NULL || PyList_GET_SIZE(list) == 0) {
+            item = joiner;
+        }
+        else {
+            item = state.isbytes ? PyBytes_Join(joiner, list)
+                                 : PyUnicode_Join(joiner, list);
+            Py_DECREF(joiner);
+        }
         Py_DECREF(list);
+    }
+    if (!item) {
         return NULL;
-    }
-    if (PyList_GET_SIZE(list) == 0) {
-        Py_DECREF(list);
-        item = joiner;
-    }
-    else {
-        if (state.isbytes)
-            item = PyBytes_Join(joiner, list);
-        else
-            item = PyUnicode_Join(joiner, list);
-        Py_DECREF(joiner);
-        Py_DECREF(list);
-        if (!item)
-            return NULL;
     }
 
     if (subn)
@@ -1561,7 +1587,8 @@ pattern_subx(_sremodulestate* module_state,
     return item;
 
 error:
-    Py_DECREF(list);
+    PyBytesWriter_Discard(writer);
+    Py_XDECREF(list);
     state_fini(&state);
     Py_DECREF(filter);
     return NULL;
