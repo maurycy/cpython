@@ -1467,9 +1467,11 @@ pattern_subx(_sremodulestate* module_state,
         e = STATE_OFFSET(&state, state.ptr);
 
         if (n == 0) {
-            /* With one full match, join can reuse the replacement itself. */
+            /* join() copies long replacements into an exactly sized result.
+               For a single full match it can reuse the replacement itself. */
             if (filter_type == LITERAL && PyBytes_CheckExact(string) &&
-                PyBytes_CheckExact(filter) && (b != 0 || e != state.endpos))
+                PyBytes_CheckExact(filter) && PyBytes_GET_SIZE(filter) <= 16 &&
+                (b != 0 || e != state.endpos))
             {
                 writer = PyBytesWriter_Create(0);
                 if (writer == NULL)
