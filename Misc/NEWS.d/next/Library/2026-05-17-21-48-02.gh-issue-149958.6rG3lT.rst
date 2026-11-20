@@ -1,0 +1,5 @@
+The Tachyon module now supports runtime control via
+``--control unix:///path`` on Unix or
+``--control pipe:<path>`` on Windows. Special characters in Unix paths must be
+percent-encoded. Supported commands are ``enable``, ``disable``, ``ping``,
+``status`` and ``quit``. Patch by Maurycy Pawłowski-Wieroński.
