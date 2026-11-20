@@ -13,6 +13,7 @@ import threading
 import time
 import unittest
 from unittest import mock
+from urllib.parse import quote
 
 try:
     import _remote_debugging
@@ -985,7 +986,8 @@ for _ in range(200):
             socket_path = socket_helper.create_unix_domain_name()
             self.addCleanup(os_helper.unlink, socket_path)
 
-            server = ControlServer(f"unix:{socket_path}")
+            uri = f"unix:{quote(os.fsencode(socket_path))}"
+            server = ControlServer(uri)
             server.start()
             self.addCleanup(server.stop)
 

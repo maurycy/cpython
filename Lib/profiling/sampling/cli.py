@@ -11,7 +11,7 @@ import subprocess
 import sys
 import time
 import webbrowser
-from contextlib import ExitStack, nullcontext
+from contextlib import nullcontext
 
 from .errors import (
     SamplingUnknownProcessError,
@@ -29,10 +29,7 @@ from .gecko_collector import GeckoCollector
 from .jsonl_collector import JsonlCollector
 from .binary_collector import BinaryCollector
 from .binary_reader import BinaryReader
-from ._control import (
-    ControlServer,
-    parse_control_uri,
-)
+from ._control import open_control
 from .constants import (
     MICROSECONDS_PER_SECOND,
     PROFILING_MODE_ALL,
@@ -310,8 +307,8 @@ def _run_with_sync(original_cmd, suppress_output=False):
 
         try:
             _wait_for_ready_signal(sync_sock, process, _SYNC_TIMEOUT_SEC)
-        except socket.timeout:
-            # If we timeout, kill the process and raise an error
+        except (socket.timeout, SystemExit) as exc:
+            # A timeout or SIGTERM during startup must also stop the child.
             if process.poll() is None:
                 process.terminate()
                 try:
@@ -319,6 +316,8 @@ def _run_with_sync(original_cmd, suppress_output=False):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+            if isinstance(exc, SystemExit):
+                raise
             raise RuntimeError(
                 "Process failed to signal readiness within timeout"
             )
@@ -426,10 +425,16 @@ def _add_sampling_options(parser):
         action="store_true",
         help="Enable async-aware profiling (uses task-based stack reconstruction)",
     )
-    sampling_group.add_argument(
+    exclusive = sampling_group.add_mutually_exclusive_group()
+    exclusive.add_argument(
         "--subprocesses",
         action="store_true",
         help="Also profile subprocesses. Each subprocess gets its own profiler and output file.",
+    )
+    exclusive.add_argument(
+        "--control", metavar="URI",
+        help="control URI (unix:///path or pipe:<path> on Windows); "
+             "percent-encode special characters in Unix paths",
     )
     sampling_group.add_argument(
         "--blocking",
@@ -437,16 +442,6 @@ def _add_sampling_options(parser):
         help="Stop all threads in target process before sampling to get consistent snapshots. "
         "Uses thread_suspend on macOS and ptrace on Linux. Adds overhead but ensures memory "
         "reads are from a frozen state.",
-    )
-
-
-def _add_control_options(parser):
-    control_group = parser.add_argument_group("Control socket")
-    control_group.add_argument(
-        "--control",
-        default=None,
-        metavar="URI",
-        help="control socket URI (unix:<path>)",
     )
 
 
@@ -911,16 +906,6 @@ def _validate_args(args, parser):
     if command == "replay":
         return
 
-    if getattr(args, 'control', None) is not None:
-        if args.subprocesses:
-            parser.error("--control is incompatible with --subprocesses.")
-        if os.name == "nt":
-            parser.error("--control is not supported on Windows.")
-        try:
-            parse_control_uri(args.control)
-        except ControlURIError as exc:
-            parser.error(str(exc))
-
     # Check if live mode is available
     if hasattr(args, 'live') and args.live and LiveStatsCollector is None:
         parser.error(
@@ -1039,6 +1024,8 @@ def main():
     locale.setlocale(locale.LC_ALL, "")
     try:
         _main()
+    except ControlError as exc:
+        sys.exit(f"Error: {exc}")
     finally:
         locale.setlocale(locale.LC_ALL, old_locale)
 
@@ -1099,7 +1086,6 @@ Examples:
         help="Interactive TUI profiler (top-like interface, press 'q' to quit, 's' to cycle sort)",
     )
     _add_sampling_options(run_parser)
-    _add_control_options(run_parser)
     _add_mode_options(run_parser)
     _add_format_options(run_parser)
     _add_pstats_options(run_parser)
@@ -1129,7 +1115,6 @@ Examples:
         help="Interactive TUI profiler (top-like interface, press 'q' to quit, 's' to cycle sort)",
     )
     _add_sampling_options(attach_parser)
-    _add_control_options(attach_parser)
     _add_mode_options(attach_parser)
     _add_format_options(attach_parser)
     _add_pstats_options(attach_parser)
@@ -1195,10 +1180,14 @@ Examples:
 
     # Execute the appropriate command
     handler = command_handlers.get(args.command)
-    if handler:
-        handler(args)
-    else:
+    if handler is None:
         parser.error(f"Unknown command: {args.command}")
+    try:
+        with open_control(getattr(args, "control", None)) as server:
+            args.control_server = server
+            handler(args)
+    except ControlURIError as exc:
+        parser.error(str(exc))
 
 
 def _handle_attach(args):
@@ -1235,16 +1224,7 @@ def _handle_attach(args):
         capture_config=_capture_config_from_args(args),
     )
 
-    server = None
-    with ExitStack() as stack:
-        if args.control:
-            server = ControlServer(args.control)
-            try:
-                server.start()
-            except ControlError as exc:
-                sys.exit(f"Error: {exc}")
-            stack.callback(server.stop)
-        stack.enter_context(_get_child_monitor_context(args, args.pid))
+    with _get_child_monitor_context(args, args.pid):
         collector = sample(
             args.pid,
             collector,
@@ -1257,7 +1237,7 @@ def _handle_attach(args):
             gc=args.gc,
             opcodes=args.opcodes,
             blocking=args.blocking,
-            control_server=server,
+            control_server=args.control_server,
         )
         _handle_output(collector, args, args.pid, mode)
 
@@ -1353,11 +1333,24 @@ def _handle_run(args):
         capture_config=_capture_config_from_args(args),
     )
 
-    server = None
-    with ExitStack() as stack:
-        stack.enter_context(_get_child_monitor_context(args, process.pid))
-
-        def _terminate_main_subprocess():
+    with _get_child_monitor_context(args, process.pid):
+        try:
+            collector = sample(
+                process.pid,
+                collector,
+                duration_sec=args.duration,
+                all_threads=args.all_threads,
+                realtime_stats=args.realtime_stats,
+                mode=mode,
+                async_aware=args.async_mode if args.async_aware else None,
+                native=args.native,
+                gc=args.gc,
+                opcodes=args.opcodes,
+                blocking=args.blocking,
+                control_server=args.control_server,
+            )
+            _handle_output(collector, args, process.pid, mode)
+        finally:
             # Terminate the main subprocess - child profilers finish when their
             # target processes exit
             if process.poll() is None:
@@ -1367,31 +1360,6 @@ def _handle_run(args):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
-        stack.callback(_terminate_main_subprocess)
-
-        if args.control:
-            server = ControlServer(args.control)
-            try:
-                server.start()
-            except ControlError as exc:
-                sys.exit(f"Error: {exc}")
-            stack.callback(server.stop)
-
-        collector = sample(
-            process.pid,
-            collector,
-            duration_sec=args.duration,
-            all_threads=args.all_threads,
-            realtime_stats=args.realtime_stats,
-            mode=mode,
-            async_aware=args.async_mode if args.async_aware else None,
-            native=args.native,
-            gc=args.gc,
-            opcodes=args.opcodes,
-            blocking=args.blocking,
-            control_server=server,
-        )
-        _handle_output(collector, args, process.pid, mode)
 
 
 def _handle_live_attach(args, pid):
@@ -1414,29 +1382,20 @@ def _handle_live_attach(args, pid):
     )
 
     # Sample in live mode
-    server = None
-    with ExitStack() as stack:
-        if args.control:
-            server = ControlServer(args.control)
-            try:
-                server.start()
-            except ControlError as exc:
-                sys.exit(f"Error: {exc}")
-            stack.callback(server.stop)
-        sample_live(
-            pid,
-            collector,
-            duration_sec=args.duration,
-            all_threads=args.all_threads,
-            realtime_stats=args.realtime_stats,
-            mode=mode,
-            async_aware=args.async_mode if args.async_aware else None,
-            native=args.native,
-            gc=args.gc,
-            opcodes=args.opcodes,
-            blocking=args.blocking,
-            control_server=server,
-        )
+    sample_live(
+        pid,
+        collector,
+        duration_sec=args.duration,
+        all_threads=args.all_threads,
+        realtime_stats=args.realtime_stats,
+        mode=mode,
+        async_aware=args.async_mode if args.async_aware else None,
+        native=args.native,
+        gc=args.gc,
+        opcodes=args.opcodes,
+        blocking=args.blocking,
+        control_server=args.control_server,
+    )
 
 
 def _handle_live_run(args):
@@ -1471,30 +1430,21 @@ def _handle_live_run(args):
     )
 
     # Profile the subprocess in live mode
-    server = None
     try:
-        with ExitStack() as stack:
-            if args.control:
-                server = ControlServer(args.control)
-                try:
-                    server.start()
-                except ControlError as exc:
-                    sys.exit(f"Error: {exc}")
-                stack.callback(server.stop)
-            sample_live(
-                process.pid,
-                collector,
-                duration_sec=args.duration,
-                all_threads=args.all_threads,
-                realtime_stats=args.realtime_stats,
-                mode=mode,
-                async_aware=args.async_mode if args.async_aware else None,
-                native=args.native,
-                gc=args.gc,
-                opcodes=args.opcodes,
-                blocking=args.blocking,
-                control_server=server,
-            )
+        sample_live(
+            process.pid,
+            collector,
+            duration_sec=args.duration,
+            all_threads=args.all_threads,
+            realtime_stats=args.realtime_stats,
+            mode=mode,
+            async_aware=args.async_mode if args.async_aware else None,
+            native=args.native,
+            gc=args.gc,
+            opcodes=args.opcodes,
+            blocking=args.blocking,
+            control_server=args.control_server,
+        )
     finally:
         # Clean up the subprocess and get any error output
         returncode = process.poll()
