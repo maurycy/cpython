@@ -542,15 +542,13 @@ class ControlServer:
 
     def _process_input(self, conn, chunk):
         conn.inbuf.extend(chunk)
-        if len(conn.inbuf) > _MAX_INBUF_BYTES:
-            self._transport.close_connection(conn)
-            return
-
-        while (newline := conn.inbuf.find(b"\n")) != -1:
+        while (newline := conn.inbuf.find(b"\n", 0, _MAX_INBUF_BYTES)) != -1:
             raw = conn.inbuf.take_bytes(newline + 1)
             line = raw[:-1].decode("utf-8", "replace").strip()
             if not self._dispatch(conn, line):
-                break
+                return
+        if len(conn.inbuf) > _MAX_INBUF_BYTES:
+            self._transport.close_connection(conn)
 
     def _dispatch(self, conn, command):
         """Handle one command; return False once the conversation is over."""

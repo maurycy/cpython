@@ -155,6 +155,15 @@ class ControlServerTests:
         )
         self.assertTrue(server.enabled)
 
+    @mock.patch("profiling.sampling._control._MAX_INBUF_BYTES", 8)
+    def test_inbuf_limit_applies_per_command(self):
+        server = self.start_server()
+        client = self.connect()
+        self.assertEqual(self.request(server, client, b"ping\np"), b"ok\n")
+        self.assertEqual(
+            self.request(server, client, b"ing\nping\n", lines=2), b"ok\nok\n"
+        )
+
     def test_commands_after_quit_are_ignored(self):
         server = self.start_server()
         client = self.connect()
@@ -175,15 +184,16 @@ class ControlServerTests:
 
     def test_inbuf_overflow_drops_connection(self):
         server = self.start_server()
-        client = self.connect()
-        self.assertEqual(self.request(server, client, b"ping\n"), b"ok\n")
-        client.sendall(b"x" * (_MAX_INBUF_BYTES + 1))
-        deadline = time.monotonic() + SHORT_TIMEOUT
-        while time.monotonic() < deadline:
-            server.poll(timeout=0.01)
-            if not server._transport._connections:
-                return
-        self.fail("server did not drop client over the inbuf cap")
+        for suffix in (b"x", b"\n"):
+            with self.subTest(suffix=suffix):
+                client = self.connect()
+                self.assertEqual(self.request(server, client, b"ping\n"), b"ok\n")
+                client.sendall(b"x" * _MAX_INBUF_BYTES + suffix)
+                deadline = time.monotonic() + SHORT_TIMEOUT
+                while server._transport._connections:
+                    if time.monotonic() >= deadline:
+                        self.fail("server did not drop client over the inbuf cap")
+                    server.poll(timeout=0.01)
 
     def test_outbuf_overflow_drops_connection(self):
         server = self.start_server()
