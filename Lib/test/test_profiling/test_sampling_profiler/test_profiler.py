@@ -2,7 +2,6 @@
 
 import contextlib
 import io
-import os
 import re
 import socket
 import time
@@ -560,85 +559,35 @@ class TestSampleProfiler(unittest.TestCase):
                     )
         mock_collector.collect.assert_not_called()
 
-    def test_sample_pauses_when_control_disabled(self):
-        """Test that disabled state stops sample collection."""
-        control_server = self._fake_control_server(enabled=False)
-        mock_collector = mock.MagicMock()
-        times = [1000.0 + i * 0.01 for i in range(60)]
-        with self._patched_unwinder() as u:
-            u.instance.get_stack_trace.return_value = []
-            profiler = SampleProfiler(
-                pid=os.getpid(), sample_interval_usec=10000, all_threads=False
-            )
-            with mock.patch("time.perf_counter", side_effect=times):
-                with io.StringIO() as output:
-                    with mock.patch("sys.stdout", output):
-                        profiler.sample(
-                            mock_collector,
-                            duration_sec=0.2,
-                            control_server=control_server,
-                        )
-        mock_collector.collect.assert_not_called()
-
     def test_sample_resumes_after_re_enable(self):
-        """Test that sampling resumes when control flips from disabled to enabled."""
-        control_server = self._fake_control_server(enabled=False)
+        server = self._fake_control_server(enabled=False)
+        collector = mock.Mock(aggregating=False, running=True)
 
-        def poll_side_effect(timeout=0):
-            if control_server.poll.call_count >= 3:
-                control_server.enabled = True
-        control_server.poll.side_effect = poll_side_effect
+        def poll(timeout):
+            if timeout > 0 and not server.enabled:
+                collector.collect.assert_not_called()
+                time.sleep(timeout)
+                server.enabled = True
 
-        mock_collector = mock.MagicMock()
-        times = [1000.0 + i * 0.01 for i in range(80)]
-        with self._patched_unwinder() as u:
-            u.instance.get_stack_trace.return_value = [
-                (1, [mock.MagicMock(filename="t.py", lineno=1, funcname="f")])
-            ]
-            profiler = SampleProfiler(
-                pid=os.getpid(), sample_interval_usec=10000, all_threads=False
-            )
-            with mock.patch("time.perf_counter", side_effect=times):
-                with io.StringIO() as output:
-                    with mock.patch("sys.stdout", output):
-                        profiler.sample(
-                            mock_collector,
-                            duration_sec=0.3,
-                            control_server=control_server,
-                        )
-        self.assertGreater(mock_collector.collect.call_count, 0)
+        def stop_after_sample(stack):
+            collector.running = False
 
-    def test_sample_rate_reflects_enabled_time(self):
-        """Test that Sample rate divides by enabled time, not wall time."""
-        control_server = self._fake_control_server(enabled=False)
+        server.poll.side_effect = poll
+        collector.collect.side_effect = stop_after_sample
+        with (
+            self._patched_unwinder() as unwinder,
+            mock.patch("_remote_debugging.is_python_process", return_value=True),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            unwinder.instance.get_stack_trace.return_value = mock.sentinel.stack
+            profiler = SampleProfiler(12345, 1000, all_threads=False)
+            profiler.sample(collector, duration_sec=SHORT_TIMEOUT, control_server=server)
 
-        def poll_side_effect(timeout=0):
-            if control_server.poll.call_count >= 10:
-                control_server.enabled = True
-        control_server.poll.side_effect = poll_side_effect
-
-        mock_collector = mock.MagicMock()
-        times = [1000.0 + i * 0.01 for i in range(120)]
-        with self._patched_unwinder() as u:
-            u.instance.get_stack_trace.return_value = [
-                (1, [mock.MagicMock(filename="t.py", lineno=1, funcname="f")])
-            ]
-            profiler = SampleProfiler(
-                pid=os.getpid(), sample_interval_usec=10000, all_threads=False
-            )
-            with mock.patch("time.perf_counter", side_effect=times):
-                with io.StringIO() as output:
-                    with mock.patch("sys.stdout", output):
-                        profiler.sample(
-                            mock_collector,
-                            duration_sec=0.5,
-                            control_server=control_server,
-                        )
-        mock_collector.set_stats.assert_called_once()
-        args = mock_collector.set_stats.call_args.args
-        running_time_sec, sample_rate = args[1], args[2]
-        samples = mock_collector.collect.call_count
-        self.assertGreater(sample_rate, samples / running_time_sec)
+        self.assertTrue(server.enabled)
+        collector.collect.assert_called_once_with(mock.sentinel.stack)
+        elapsed, sample_rate = collector.set_stats.call_args.args[1:3]
+        # The reported rate excludes the time spent paused.
+        self.assertGreater(sample_rate, 1 / elapsed)
 
 
 @force_not_colorized_test_class
