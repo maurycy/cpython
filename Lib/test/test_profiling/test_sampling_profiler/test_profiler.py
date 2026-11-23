@@ -3,6 +3,8 @@
 import contextlib
 import io
 import re
+import socket
+import time
 import types
 from unittest import mock
 import unittest
@@ -10,14 +12,19 @@ import unittest
 try:
     import _remote_debugging  # noqa: F401
     from profiling.sampling.constants import PROFILING_MODE_ALL, PROFILING_MODE_WALL
-    from profiling.sampling.sample import SampleProfiler, dump_stack
+    from profiling.sampling.sample import LiveStatsCollector, SampleProfiler, dump_stack, sample_live
     from profiling.sampling.pstats_collector import PstatsCollector
 except ImportError:
     raise unittest.SkipTest(
         "Test only runs when _remote_debugging is available"
     )
 
-from test.support import force_colorized, force_not_colorized_test_class
+from test.support import (
+    SHORT_TIMEOUT, force_colorized, force_not_colorized_test_class,
+    requires_remote_subprocess_debugging,
+)
+
+from .helpers import test_subprocess
 
 
 def print_sampled_stats(stats, sort=-1, limit=None, show_summary=True, sample_interval_usec=100):
@@ -210,7 +217,6 @@ class TestSampleProfiler(unittest.TestCase):
 
         stack_frames = [mock.sentinel.stack_frames]
         mock_collector = mock.MagicMock()
-        mock_collector.aggregating = False
 
         with self._patched_unwinder() as u:
             u.instance.get_stack_trace.return_value = stack_frames
@@ -223,7 +229,7 @@ class TestSampleProfiler(unittest.TestCase):
                 pid=12345, sample_interval_usec=10000, all_threads=False
             )
 
-            times = [0.0, 0.01, 0.011, 0.02, 0.03]
+            times = [0.0, 0.01, 0.011, 0.02, 0.03, 0.04, 0.05]
             with mock.patch("time.perf_counter", side_effect=times):
                 with io.StringIO() as output:
                     with mock.patch("sys.stdout", output):
@@ -260,6 +266,7 @@ class TestSampleProfiler(unittest.TestCase):
                 0.03, 0.031,
                 0.04, 0.041,
                 0.05, 0.051,
+                0.06, 0.061,
             ]
             with mock.patch("profiling.sampling.sample.MAX_PENDING_SAMPLES", 2):
                 with mock.patch("time.perf_counter", side_effect=times):
@@ -322,7 +329,7 @@ class TestSampleProfiler(unittest.TestCase):
             mock_collector = mock.MagicMock()
 
             # Control timing to run exactly 5 samples
-            times = [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06]
+            times = [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08]
 
             with mock.patch("time.perf_counter", side_effect=times):
                 with io.StringIO() as output:
@@ -376,6 +383,9 @@ class TestSampleProfiler(unittest.TestCase):
                 0.5,
                 0.6,
                 0.7,
+                0.8,
+                0.9,
+                1.0,
             ]  # Extra time points to avoid StopIteration
 
             with mock.patch("time.perf_counter", side_effect=times):
@@ -413,7 +423,7 @@ class TestSampleProfiler(unittest.TestCase):
                 pid=12345, sample_interval_usec=10000, all_threads=False
             )
             mock_collector = mock.MagicMock()
-            times = [0.0, 0.01, 0.02, 0.03, 0.04]
+            times = [0.0, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06]
             with mock.patch("time.perf_counter", side_effect=times):
                 with io.StringIO() as output:
                     with mock.patch("sys.stdout", output):
@@ -428,6 +438,156 @@ class TestSampleProfiler(unittest.TestCase):
             self.assertIn("Captured", result)
             self.assertIn("samples", result)
             self.assertNotIn("Warning: missed", result)
+
+    @staticmethod
+    def _fake_control_server(*, enabled=True, running=True):
+        """Build a minimal control_server stub for sample() integration."""
+        return types.SimpleNamespace(enabled=enabled, running=running, poll=mock.Mock())
+
+    def test_final_flush_excluded_from_duration(self):
+        def sample_with_flush_delay(delay):
+            now = 0.0
+
+            def clock():
+                nonlocal now
+                now += 0.001
+                return now
+
+            def collect(*args, **kwargs):
+                nonlocal now
+                now += delay
+
+            with (
+                self._patched_unwinder() as unwinder,
+                mock.patch("time.perf_counter", side_effect=clock),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                unwinder.instance.get_stack_trace.return_value = []
+                collector = mock.Mock(aggregating=True, running=True)
+                collector.collect.side_effect = collect
+                profiler = SampleProfiler(12345, 1000, all_threads=False)
+                profiler.sample(collector, duration_sec=0.05)
+                collector.collect.assert_called_once()
+                return collector.set_stats.call_args.args
+
+        self.assertEqual(sample_with_flush_delay(0), sample_with_flush_delay(0.1))
+
+    @requires_remote_subprocess_debugging()
+    def test_paused_profiler_observes_target_exit(self):
+        with test_subprocess("_test_sock.recv(1)") as target:
+            profiler = SampleProfiler(target.process.pid, 1000, all_threads=False)
+            server = self._fake_control_server(enabled=False)
+            server.poll.side_effect = lambda timeout: time.sleep(timeout)
+            collector = mock.Mock()
+            # Leave the target unreaped until the paused sampler observes its exit.
+            target.socket.shutdown(socket.SHUT_WR)
+            with contextlib.redirect_stdout(io.StringIO()):
+                profiler.sample(collector, duration_sec=SHORT_TIMEOUT,
+                                control_server=server)
+            collector.collect.assert_not_called()
+            duration = collector.set_stats.call_args.args[1]
+            self.assertLess(duration, SHORT_TIMEOUT, "missed target exit")
+            self.assertEqual(target.process.wait(timeout=SHORT_TIMEOUT), 0)
+
+    @unittest.skipIf(LiveStatsCollector is None, "requires curses")
+    def test_live_keyboard_quit_while_paused(self):
+        collector = mock.Mock(spec=LiveStatsCollector, running=True)
+        collector._handle_input.side_effect = lambda: setattr(collector, "running", False)
+        server = self._fake_control_server(enabled=False)
+        with (
+            self._patched_unwinder() as unwinder,
+            mock.patch("_remote_debugging.is_python_process", return_value=True),
+        ):
+            profiler = SampleProfiler(12345, 1000, all_threads=False)
+            profiler.sample(collector, duration_sec=0.1, control_server=server)
+        collector._handle_input.assert_called_once()
+        unwinder.instance.get_stack_trace.assert_not_called()
+        self.assertFalse(collector.running)
+
+    @unittest.skipIf(LiveStatsCollector is None, "requires curses")
+    def test_finished_live_display_polls_control(self):
+        collector = mock.Mock(running=True, successful_samples=200, sample_interval_usec=1000)
+        server = self._fake_control_server()
+        server.poll.side_effect = lambda timeout: setattr(server, "running", False)
+        # Fail if the display loops waiting for another key after remote quit.
+        collector._handle_input.side_effect = [None, AssertionError("quit was missed")]
+        with (
+            mock.patch("profiling.sampling.sample._is_process_running", return_value=True),
+            mock.patch("profiling.sampling.sample.SampleProfiler"),
+            mock.patch("curses.wrapper", side_effect=lambda run: run(mock.Mock())),
+        ):
+            sample_live(12345, collector, control_server=server)
+        collector.mark_finished.assert_called_once()
+        server.poll.assert_called_once()
+        collector.cleanup_curses.assert_called_once()
+
+    def test_sample_polls_control_server_periodically(self):
+        """Test that sample() drives control_server.poll() during the loop."""
+        control_server = self._fake_control_server()
+        mock_collector = mock.MagicMock()
+        times = [1000.0 + i * 0.01 for i in range(60)]
+        with self._patched_unwinder() as u:
+            u.instance.get_stack_trace.return_value = []
+            profiler = SampleProfiler(
+                pid=12345, sample_interval_usec=10000, all_threads=False
+            )
+            with mock.patch("time.perf_counter", side_effect=times):
+                with io.StringIO() as output:
+                    with mock.patch("sys.stdout", output):
+                        profiler.sample(
+                            mock_collector,
+                            duration_sec=0.2,
+                            control_server=control_server,
+                        )
+        self.assertTrue(control_server.poll.called)
+
+    def test_sample_breaks_when_control_running_false(self):
+        """Test that sample() exits immediately when control.running is False."""
+        control_server = self._fake_control_server(running=False)
+        mock_collector = mock.MagicMock()
+        with self._patched_unwinder() as u:
+            u.instance.get_stack_trace.return_value = []
+            profiler = SampleProfiler(
+                pid=12345, sample_interval_usec=10000, all_threads=False
+            )
+            with io.StringIO() as output:
+                with mock.patch("sys.stdout", output):
+                    profiler.sample(
+                        mock_collector,
+                        duration_sec=60,
+                        control_server=control_server,
+                    )
+        mock_collector.collect.assert_not_called()
+
+    def test_sample_resumes_after_re_enable(self):
+        server = self._fake_control_server(enabled=False)
+        collector = mock.Mock(aggregating=False, running=True)
+
+        def poll(timeout):
+            if timeout > 0 and not server.enabled:
+                collector.collect.assert_not_called()
+                time.sleep(timeout)
+                server.enabled = True
+
+        def stop_after_sample(stack):
+            collector.running = False
+
+        server.poll.side_effect = poll
+        collector.collect.side_effect = stop_after_sample
+        with (
+            self._patched_unwinder() as unwinder,
+            mock.patch("_remote_debugging.is_python_process", return_value=True),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            unwinder.instance.get_stack_trace.return_value = mock.sentinel.stack
+            profiler = SampleProfiler(12345, 1000, all_threads=False)
+            profiler.sample(collector, duration_sec=SHORT_TIMEOUT, control_server=server)
+
+        self.assertTrue(server.enabled)
+        collector.collect.assert_called_once_with(mock.sentinel.stack)
+        elapsed, sample_rate = collector.set_stats.call_args.args[1:3]
+        # The reported rate excludes the time spent paused.
+        self.assertGreater(sample_rate, 1 / elapsed)
 
 
 @force_not_colorized_test_class

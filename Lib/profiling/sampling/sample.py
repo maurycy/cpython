@@ -46,6 +46,9 @@ MIN_SAMPLES_FOR_TUI = 200
 # Maximum number of consecutive identical samples to keep before flushing.
 MAX_PENDING_SAMPLES = 8192
 
+# Service the keyboard and check for target exit while no samples arrive.
+_CONTROL_IDLE_INTERVAL = 0.05
+
 
 def _resolve_python_pid(pid):
     """On Windows, if pid is a venvlauncher process, return the child Python PID.
@@ -123,13 +126,18 @@ class SampleProfiler:
         """Return a single stack snapshot from the target process."""
         return self._get_stack_trace(async_aware=async_aware)
 
-    def sample(self, collector, duration_sec=None, *, async_aware=False):
+    def sample(self, collector, duration_sec=None, *, async_aware=False, control_server=None):
         sample_interval_sec = self.sample_interval_usec / 1_000_000
         num_samples = 0
         errors = 0
         interrupted = False
         running_time_sec = 0
         start_time = next_time = time.perf_counter()
+        is_live_mode = LiveStatsCollector is not None and isinstance(collector, LiveStatsCollector)
+        paused_time = 0
+        paused_since = None
+        next_control_poll = next_target_check = start_time
+        deadline = float("inf") if duration_sec is None else start_time + duration_sec
         last_sample_time = start_time
         realtime_update_interval = 1.0  # Update every second
         last_realtime_update = start_time
@@ -154,11 +162,43 @@ class SampleProfiler:
                     break
 
                 current_time = time.perf_counter()
+                if control_server is not None:
+                    if paused_since is not None:
+                        wake_at = min(next_target_check, deadline)
+                        control_server.poll(timeout=max(0, wake_at - current_time))
+                        current_time = time.perf_counter()
+                    elif current_time >= next_control_poll:
+                        control_server.poll(timeout=0)
+                        next_control_poll = current_time + 0.001
+
+                    running_time_sec = current_time - start_time
+                    if not control_server.running or current_time >= deadline:
+                        break
+                    if not control_server.enabled:
+                        if paused_since is None:
+                            paused_since = running_time_sec
+                        if current_time >= next_target_check:
+                            # A zombie still has a PID but no Python runtime.
+                            if not _remote_debugging.is_python_process(self.pid):
+                                break
+                            if is_live_mode:
+                                collector._handle_input()
+                            next_target_check = current_time + _CONTROL_IDLE_INTERVAL
+                        continue
+                    if paused_since is not None:
+                        paused_time += running_time_sec - paused_since
+                        paused_since = None
+                        next_time = current_time + sample_interval_sec
+                        last_sample_time = last_realtime_update = current_time
+
                 current_time_us = int(current_time * 1_000_000)
                 if next_time > current_time:
                     sleep_time = (next_time - current_time) * 0.9
                     if sleep_time > 0.0001:
-                        time.sleep(sleep_time)
+                        if control_server is not None and sleep_time >= _CONTROL_IDLE_INTERVAL:
+                            control_server.poll(timeout=min(sleep_time, deadline - current_time))
+                        else:
+                            time.sleep(sleep_time)
                 elif next_time < current_time:
                     try:
                         stack_frames = self._get_stack_trace(
@@ -220,13 +260,15 @@ class SampleProfiler:
         if self.realtime_stats and len(self.sample_intervals) > 0:
             print()  # Add newline after real-time stats
 
-        sample_rate = num_samples / running_time_sec if running_time_sec > 0 else 0
+        if paused_since is not None:
+            paused_time += running_time_sec - paused_since
+        enabled_time_sec = running_time_sec - paused_time
+        sample_rate = num_samples / enabled_time_sec if enabled_time_sec > 0 else 0
         error_rate = (errors / num_samples) * 100 if num_samples > 0 else 0
-        expected_samples = int(running_time_sec / sample_interval_sec)
+        expected_samples = int(enabled_time_sec / sample_interval_sec)
         missed_samples = (expected_samples - num_samples) / expected_samples * 100 if expected_samples > 0 else 0
 
         # Don't print stats for live mode (curses is handling display)
-        is_live_mode = LiveStatsCollector is not None and isinstance(collector, LiveStatsCollector)
         if not is_live_mode:
             s = "" if num_samples == 1 else "s"
             print(f"Captured {num_samples:n} sample{s} in {fmt(running_time_sec, 2)} seconds")
@@ -481,6 +523,7 @@ def sample(
     gc=True,
     opcodes=False,
     blocking=False,
+    control_server=None,
 ):
     """Sample a process using the provided collector.
 
@@ -528,7 +571,8 @@ def sample(
     profiler.realtime_stats = realtime_stats
 
     # Run the sampling
-    profiler.sample(collector, duration_sec, async_aware=async_aware)
+    profiler.sample(collector, duration_sec, async_aware=async_aware,
+                    control_server=control_server)
 
     return collector
 
@@ -577,6 +621,7 @@ def sample_live(
     gc=True,
     opcodes=False,
     blocking=False,
+    control_server=None,
 ):
     """Sample a process in live/interactive mode with curses TUI.
 
@@ -630,7 +675,10 @@ def sample_live(
     def curses_wrapper_func(stdscr):
         collector.init_curses(stdscr)
         try:
-            profiler.sample(collector, duration_sec, async_aware=async_aware)
+            profiler.sample(
+                collector, duration_sec, async_aware=async_aware,
+                control_server=control_server,
+            )
             # If too few samples were collected, exit cleanly without showing TUI
             if collector.successful_samples < MIN_SAMPLES_FOR_TUI:
                 # Clear screen before exiting to avoid visual artifacts
@@ -640,9 +688,12 @@ def sample_live(
             # Mark as finished and keep the TUI running until user presses 'q'
             collector.mark_finished()
             # Keep processing input until user quits
-            while collector.running:
+            while collector.running and (control_server is None or control_server.running):
                 collector._handle_input()
-                time.sleep(0.05)  # Small sleep to avoid busy waiting
+                if control_server is None:
+                    time.sleep(_CONTROL_IDLE_INTERVAL)
+                else:
+                    control_server.poll(timeout=_CONTROL_IDLE_INTERVAL)
         finally:
             collector.cleanup_curses()
 

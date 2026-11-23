@@ -13,7 +13,13 @@ import time
 import webbrowser
 from contextlib import nullcontext
 
-from .errors import SamplingUnknownProcessError, SamplingModuleNotFoundError, SamplingScriptNotFoundError
+from .errors import (
+    SamplingUnknownProcessError,
+    SamplingModuleNotFoundError,
+    SamplingScriptNotFoundError,
+    ControlError,
+    ControlURIError,
+)
 from .sample import sample, sample_live, dump_stack, _is_process_running
 from .dump import print_stack_dump
 from .pstats_collector import PstatsCollector
@@ -23,6 +29,7 @@ from .gecko_collector import GeckoCollector
 from .jsonl_collector import JsonlCollector
 from .binary_collector import BinaryCollector
 from .binary_reader import BinaryReader
+from ._control import open_control
 from .constants import (
     MICROSECONDS_PER_SECOND,
     PROFILING_MODE_ALL,
@@ -300,8 +307,8 @@ def _run_with_sync(original_cmd, suppress_output=False):
 
         try:
             _wait_for_ready_signal(sync_sock, process, _SYNC_TIMEOUT_SEC)
-        except socket.timeout:
-            # If we timeout, kill the process and raise an error
+        except (socket.timeout, SystemExit) as exc:
+            # A timeout or SIGTERM during startup must also stop the child.
             if process.poll() is None:
                 process.terminate()
                 try:
@@ -309,6 +316,8 @@ def _run_with_sync(original_cmd, suppress_output=False):
                 except subprocess.TimeoutExpired:
                     process.kill()
                     process.wait()
+            if isinstance(exc, SystemExit):
+                raise
             raise RuntimeError(
                 "Process failed to signal readiness within timeout"
             )
@@ -416,10 +425,16 @@ def _add_sampling_options(parser):
         action="store_true",
         help="Enable async-aware profiling (uses task-based stack reconstruction)",
     )
-    sampling_group.add_argument(
+    exclusive = sampling_group.add_mutually_exclusive_group()
+    exclusive.add_argument(
         "--subprocesses",
         action="store_true",
         help="Also profile subprocesses. Each subprocess gets its own profiler and output file.",
+    )
+    exclusive.add_argument(
+        "--control", metavar="URI",
+        help="control URI (unix:///path or pipe:<path> on Windows); "
+             "percent-encode special characters in Unix paths",
     )
     sampling_group.add_argument(
         "--blocking",
@@ -1009,6 +1024,8 @@ def main():
     locale.setlocale(locale.LC_ALL, "")
     try:
         _main()
+    except ControlError as exc:
+        sys.exit(f"Error: {exc}")
     finally:
         locale.setlocale(locale.LC_ALL, old_locale)
 
@@ -1163,10 +1180,14 @@ Examples:
 
     # Execute the appropriate command
     handler = command_handlers.get(args.command)
-    if handler:
-        handler(args)
-    else:
+    if handler is None:
         parser.error(f"Unknown command: {args.command}")
+    try:
+        with open_control(getattr(args, "control", None)) as server:
+            args.control_server = server
+            handler(args)
+    except ControlURIError as exc:
+        parser.error(str(exc))
 
 
 def _handle_attach(args):
@@ -1216,6 +1237,7 @@ def _handle_attach(args):
             gc=args.gc,
             opcodes=args.opcodes,
             blocking=args.blocking,
+            control_server=args.control_server,
         )
         _handle_output(collector, args, args.pid, mode)
 
@@ -1325,6 +1347,7 @@ def _handle_run(args):
                 gc=args.gc,
                 opcodes=args.opcodes,
                 blocking=args.blocking,
+                control_server=args.control_server,
             )
             _handle_output(collector, args, process.pid, mode)
         finally:
@@ -1371,6 +1394,7 @@ def _handle_live_attach(args, pid):
         gc=args.gc,
         opcodes=args.opcodes,
         blocking=args.blocking,
+        control_server=args.control_server,
     )
 
 
@@ -1419,6 +1443,7 @@ def _handle_live_run(args):
             gc=args.gc,
             opcodes=args.opcodes,
             blocking=args.blocking,
+            control_server=args.control_server,
         )
     finally:
         # Clean up the subprocess and get any error output
