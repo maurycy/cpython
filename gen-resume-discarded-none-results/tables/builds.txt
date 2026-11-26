@@ -1,0 +1,4 @@
+3.16.0a2+dev (heads/main:c0ee4bb03e3, Nov 26 2026, 06:51:09) [GCC 13.3.0]
+'--enable-optimizations' '--with-lto' '--prefix=/home/ubuntu/bench/inst/base'
+3.16.0a2+dev (heads/main-dirty:c0ee4bb03e3, Nov 26 2026, 06:51:19) [GCC 13.3.0]
+'--enable-optimizations' '--with-lto' '--prefix=/home/ubuntu/bench/inst/patch'

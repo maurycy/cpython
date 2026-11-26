@@ -1,0 +1,3 @@
+backend=perf python=/home/ubuntu/bench/patch-dbg/python n=200000 metric=instructions:u/iter
+gen_for_loop       1951.59   misses/iter 0.001
+next_from_c        2581.56   misses/iter 0.000

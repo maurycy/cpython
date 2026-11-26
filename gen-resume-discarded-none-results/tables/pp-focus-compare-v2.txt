@@ -1,0 +1,25 @@
+Benchmarks with tag 'asyncio':
+==============================
+
++----------------+---------------+----------------------+
+| Benchmark      | pp-focus-base | pp-focus-v2          |
++================+===============+======================+
+| asyncio_tcp    | 192 ms        | 187 ms: 1.02x faster |
++----------------+---------------+----------------------+
+| Geometric mean | (ref)         | 1.00x faster         |
++----------------+---------------+----------------------+
+
+Benchmark hidden because not significant (5): async_generators, async_tree_none, async_tree_cpu_io_mixed, async_tree_io, coroutines
+
+All benchmarks:
+===============
+
++----------------+---------------+----------------------+
+| Benchmark      | pp-focus-base | pp-focus-v2          |
++================+===============+======================+
+| asyncio_tcp    | 192 ms        | 187 ms: 1.02x faster |
++----------------+---------------+----------------------+
+| Geometric mean | (ref)         | 1.00x faster         |
++----------------+---------------+----------------------+
+
+Benchmark hidden because not significant (8): async_generators, async_tree_none, async_tree_cpu_io_mixed, async_tree_io, comprehensions, coroutines, generators, nqueens

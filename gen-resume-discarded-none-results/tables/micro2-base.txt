@@ -1,0 +1,150 @@
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.call_return: Mean +- std dev: 17.2 us +- 0.2 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.call_return_kwargs: Mean +- std dev: 27.2 us +- 0.8 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.gen_for_loop: Mean +- std dev: 13.9 us +- 0.4 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.gen_send: Mean +- std dev: 22.8 us +- 0.6 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.next_from_c: Mean +- std dev: 25.5 us +- 0.4 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.send_value_discarded: Mean +- std dev: 23.6 us +- 0.3 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.next_value_assigned: Mean +- std dev: 25.3 us +- 0.8 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.list_of_gen: Mean +- std dev: 14.9 us +- 0.3 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.yield_from_depth5: Mean +- std dev: 58.5 us +- 3.3 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.await_chain: Mean +- std dev: 171 us +- 2 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.asyncio_pingpong: Mean +- std dev: 4.53 ms +- 0.06 ms
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.recursion_depth200: Mean +- std dev: 4.04 ms +- 0.06 ms
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.recursion_depth600: Mean +- std dev: 11.8 ms +- 0.1 ms
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.exception_unwind10: Mean +- std dev: 688 us +- 15 us
+......
+WARNING: the benchmark result may be unstable
+* Not enough samples to get a stable result (95% certainty of less than 1% variation)
+
+Try to rerun the benchmark with more runs, values and/or loops.
+Run 'python -m pyperf system tune' command to reduce the system jitter.
+Use pyperf stats, pyperf dump and pyperf hist to analyze results.
+Use --quiet option to hide these warnings.
+
+micro.init_shim: Mean +- std dev: 50.8 us +- 1.0 us
