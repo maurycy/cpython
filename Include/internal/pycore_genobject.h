@@ -12,6 +12,35 @@ extern "C" {
 #include "pycore_interpframe_structs.h" // _PyGenObject
 
 #include <stddef.h>               // offsetof()
+#include "pycore_tstate.h"        // _PyThreadStateImpl
+#include "pycore_interpframe.h"   // _PyFrame_GetCode()
+#include "pycore_pyatomic_ft_wrappers.h"
+#include "opcode_ids.h"           // RESUME_CHECK
+
+/* A suspended generator whose next instructions are RESUME_CHECK and
+   POP_TOP discards the value it is resumed with. When RESUME_CHECK would
+   pass, both instructions can be skipped and the value need not be
+   pushed. Returns the instruction to resume at, or NULL. */
+static inline _Py_CODEUNIT *
+_PyGen_SkipDiscardedResume(PyThreadState *tstate, _PyInterpreterFrame *frame)
+{
+    _Py_CODEUNIT *ip = frame->instr_ptr;
+    if (ip[0].op.code != RESUME_CHECK || ip[2].op.code != POP_TOP) {
+        return NULL;
+    }
+    uintptr_t eval_breaker = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker);
+    uintptr_t version = FT_ATOMIC_LOAD_UINTPTR_ACQUIRE(
+        _PyFrame_GetCode(frame)->_co_instrumentation_version);
+    if (eval_breaker != version) {
+        return NULL;
+    }
+#ifdef Py_GIL_DISABLED
+    if (frame->tlbc_index != ((_PyThreadStateImpl *)tstate)->tlbc_index) {
+        return NULL;
+    }
+#endif
+    return ip + 3;
+}
 
 
 static inline
