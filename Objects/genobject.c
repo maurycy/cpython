@@ -258,7 +258,7 @@ gen_raise_already_executing_error(PyGenObject *gen)
 // returned value.
 // The generator must be in the FRAME_EXECUTING state when this function
 // is called.
-static PySendResult
+static inline Py_ALWAYS_INLINE PySendResult
 gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
 {
     assert(FT_ATOMIC_LOAD_INT8_RELAXED(gen->gi_frame_state) == FRAME_EXECUTING);

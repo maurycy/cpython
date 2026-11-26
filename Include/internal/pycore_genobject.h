@@ -21,7 +21,7 @@ extern "C" {
    POP_TOP discards the value it is resumed with. When RESUME_CHECK would
    pass, both instructions can be skipped and the value need not be
    pushed. Returns the instruction to resume at, or NULL. */
-static inline _Py_CODEUNIT *
+static inline Py_ALWAYS_INLINE _Py_CODEUNIT *
 _PyGen_SkipDiscardedResume(PyThreadState *tstate, _PyInterpreterFrame *frame)
 {
     _Py_CODEUNIT *ip = frame->instr_ptr;
