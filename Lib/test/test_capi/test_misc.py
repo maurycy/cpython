@@ -3034,6 +3034,23 @@ class Test_Pep523API(unittest.TestCase):
         names = ["func", "inner"]
         self.do_test(func, names)
 
+    def test_generator_resume_state(self):
+        def gen():
+            while True:
+                yield
+
+        g = gen()
+        next(g)
+        next(g)  # Specialize the resume instruction after the yield.
+        lasti = g.gi_frame.f_lasti
+        states = []
+        try:
+            _testinternalcapi.set_eval_frame_record(states, True)
+            next(g)
+        finally:
+            _testinternalcapi.set_eval_frame_default()
+        self.assertEqual(states, [(lasti, 1)])
+
     def test_inlined_for_iter(self):
         def gen():
             yield 42

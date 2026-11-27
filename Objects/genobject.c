@@ -266,10 +266,10 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
     PyThreadState *tstate = _PyThreadState_GET();
     _PyInterpreterFrame *frame = &gen->gi_iframe;
 
-    /* Push arg onto the frame's value stack */
     PyObject *arg_obj = arg ? arg : Py_None;
     _Py_CODEUNIT *skip = NULL;
-    if (arg_obj == Py_None) {
+    /* Preserve the resume point and stack for exceptions and PEP 523 hooks. */
+    if (arg_obj == Py_None && !exc && tstate->interp->eval_frame == NULL) {
         skip = _PyGen_SkipDiscardedResume(tstate, frame);
     }
     if (skip != NULL) {

@@ -149,6 +149,7 @@ _get_current_module(void)
 
 typedef struct {
     PyObject *record_list;
+    int record_frame_state;
 } module_state;
 
 static inline module_state *
@@ -1234,9 +1235,20 @@ record_eval(PyThreadState *tstate, struct _PyInterpreterFrame *f, int exc)
         assert(module != NULL);
         module_state *state = get_module_state(module);
         Py_DECREF(module);
-        PyObject *name = Py_NewRef(FT_ATOMIC_LOAD_PTR_ACQUIRE(func->func_name));
-        int res = PyList_Append(state->record_list, name);
-        Py_DECREF(name);
+        PyObject *entry;
+        if (FT_ATOMIC_LOAD_INT_RELAXED(state->record_frame_state)) {
+            Py_ssize_t depth = _PyFrame_GetStackPointer(f) - _PyFrame_Stackbase(f);
+            int lasti = PyUnstable_InterpreterFrame_GetLasti(f);
+            entry = Py_BuildValue("(in)", lasti, depth);
+            if (entry == NULL) {
+                return NULL;
+            }
+        }
+        else {
+            entry = Py_NewRef(FT_ATOMIC_LOAD_PTR_ACQUIRE(func->func_name));
+        }
+        int res = PyList_Append(state->record_list, entry);
+        Py_DECREF(entry);
         if (res < 0) {
             return NULL;
         }
@@ -1246,13 +1258,16 @@ record_eval(PyThreadState *tstate, struct _PyInterpreterFrame *f, int exc)
 
 
 static PyObject *
-set_eval_frame_record(PyObject *self, PyObject *list)
+set_eval_frame_record(PyObject *self, PyObject *args)
 {
-    module_state *state = get_module_state(self);
-    if (!PyList_Check(list)) {
-        PyErr_SetString(PyExc_TypeError, "argument must be a list");
+    PyObject *list;
+    int record_frame_state = 0;
+    if (!PyArg_ParseTuple(args, "O!|p:set_eval_frame_record",
+                          &PyList_Type, &list, &record_frame_state)) {
         return NULL;
     }
+    module_state *state = get_module_state(self);
+    FT_ATOMIC_STORE_INT_RELAXED(state->record_frame_state, record_frame_state);
     Py_XSETREF(state->record_list, Py_NewRef(list));
     _PyInterpreterState_SetEvalFrameFunc(_PyInterpreterState_GET(), record_eval);
     Py_RETURN_NONE;
@@ -3509,7 +3524,7 @@ static PyMethodDef module_functions[] = {
     {"decode_locale", decode_locale, METH_VARARGS},
     {"set_eval_frame_default", set_eval_frame_default, METH_NOARGS, NULL},
     {"set_eval_frame_interp", set_eval_frame_interp, METH_VARARGS, NULL},
-    {"set_eval_frame_record", set_eval_frame_record, METH_O, NULL},
+    {"set_eval_frame_record", set_eval_frame_record, METH_VARARGS, NULL},
     {"is_specialization_enabled", is_specialization_enabled, METH_NOARGS, NULL},
     _TESTINTERNALCAPI_COMPILER_CLEANDOC_METHODDEF
     _TESTINTERNALCAPI_NEW_INSTRUCTION_SEQUENCE_METHODDEF

@@ -901,6 +901,26 @@ class GeneratorThrowTest(unittest.TestCase):
 
 class GeneratorStackTraceTest(unittest.TestCase):
 
+    def test_throw_and_close_traceback_at_yield(self):
+        def gen():
+            try:
+                while True:
+                    yield
+            except (ValueError, GeneratorExit) as exc:
+                return exc.__traceback__.tb_lasti
+
+        g = gen()
+        next(g)
+        next(g)  # Specialize the resume instruction after the yield.
+        lasti = g.gi_frame.f_lasti
+        with self.assertRaises(StopIteration) as cm:
+            g.throw(ValueError)
+        self.assertEqual(cm.exception.value, lasti)
+
+        g = gen()
+        next(g)
+        self.assertEqual(g.close(), lasti)
+
     def check_stack_names(self, frame, expected):
         names = []
         while frame:
