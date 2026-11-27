@@ -1,0 +1,178 @@
+{
+ "backend": "perf",
+ "python": "/home/ubuntu/bench/inst/patch/bin/python3.16",
+ "n": 200000,
+ "metric": "instructions:u",
+ "results": {
+  "call_return": {
+   "instructions:u": 440.97886666666665,
+   "branches:u": 69.98376166666667,
+   "branch-misses:u": 0.0038916666666666665
+  },
+  "call_return_kwargs": {
+   "instructions:u": 703.0039366666666,
+   "branches:u": 121.01917333333333,
+   "branch-misses:u": -0.0022483333333333335
+  },
+  "gen_for_loop": {
+   "instructions:u": 289.99279666666666,
+   "branches:u": 44.99083,
+   "branch-misses:u": -0.0023716666666666665
+  },
+  "gen_send": {
+   "instructions:u": 563.043195,
+   "branches:u": 85.02514333333333,
+   "branch-misses:u": -0.005118333333333333
+  },
+  "next_from_c": {
+   "instructions:u": 577.0289483333333,
+   "branches:u": 85.01115333333334,
+   "branch-misses:u": -0.006035
+  },
+  "send_value_discarded": {
+   "instructions:u": 559.9434383333333,
+   "branches:u": 83.98068333333333,
+   "branch-misses:u": 0.0034783333333333333
+  },
+  "next_value_assigned": {
+   "instructions:u": 608.0087983333333,
+   "branches:u": 89.00293166666667,
+   "branch-misses:u": 0.00287
+  },
+  "list_of_gen": {
+   "instructions:u": 451.63814666666667,
+   "branches:u": 75.256475,
+   "branch-misses:u": 0.056181666666666664
+  },
+  "yield_from_depth5": {
+   "instructions:u": 1246.934585,
+   "branches:u": 186.96880666666667,
+   "branch-misses:u": 0.008878333333333334
+  },
+  "await_chain": {
+   "instructions:u": 3671.321191666667,
+   "branches:u": 609.676195,
+   "branch-misses:u": 0.010106666666666667
+  },
+  "asyncio_pingpong": {
+   "instructions:u": 53976.379433333335,
+   "branches:u": 9135.009815,
+   "branch-misses:u": 13.676348333333333
+  },
+  "recursion_depth200": {
+   "instructions:u": 89538.34404833334,
+   "branches:u": 12713.57315,
+   "branch-misses:u": 4.028458333333333
+  },
+  "recursion_depth600": {
+   "instructions:u": 67064.66695,
+   "branches:u": 9535.247216666667,
+   "branch-misses:u": 13.047351666666666
+  },
+  "exception_unwind10": {
+   "instructions:u": 15123.5346,
+   "branches:u": 2617.290663333333,
+   "branch-misses:u": 2.3603083333333332
+  },
+  "init_shim": {
+   "instructions:u": 1226.9118183333333,
+   "branches:u": 215.96857,
+   "branch-misses:u": 0.015873333333333333
+  },
+  "property_get": {
+   "instructions:u": 371.92871,
+   "branches:u": 57.963968333333334,
+   "branch-misses:u": 0.012693333333333333
+  },
+  "sort_key_callback": {
+   "instructions:u": 506.36935,
+   "branches:u": 92.25438,
+   "branch-misses:u": 0.0076616666666666665
+  },
+  "del_finalizer": {
+   "instructions:u": 1515.024965,
+   "branches:u": 285.012105,
+   "branch-misses:u": 0.0006216666666666666
+  },
+  "frame_object_access": {
+   "instructions:u": 1382.8626,
+   "branches:u": 235.95222833333332,
+   "branch-misses:u": 0.006723333333333334
+  },
+  "frame_noescape": {
+   "instructions:u": 1026.9729783333332,
+   "branches:u": 169.98803166666667,
+   "branch-misses:u": -2.6666666666666667e-05
+  },
+  "return_depth10": {
+   "instructions:u": 4896.969015,
+   "branches:u": 710.9784583333334,
+   "branch-misses:u": 1.3816666666666666
+  },
+  "exception_unwind20": {
+   "instructions:u": 27684.059888333333,
+   "branches:u": 4693.008731666667,
+   "branch-misses:u": 6.001781666666667
+  },
+  "asyncio_short_tasks": {
+   "instructions:u": 43453.90270333333,
+   "branches:u": 8487.740546666666,
+   "branch-misses:u": 4.167093333333334
+  },
+  "asyncio_short_tasks_sleep0": {
+   "instructions:u": 66639.73600833333,
+   "branches:u": 13377.132835,
+   "branch-misses:u": 11.295671666666667
+  },
+  "asyncio_tree_gather": {
+   "instructions:u": 37785.568251666664,
+   "branches:u": 6434.839943333333,
+   "branch-misses:u": 7.393425
+  },
+  "asyncio_callbacks": {
+   "instructions:u": 14428.1216,
+   "branches:u": 2875.5935033333335,
+   "branch-misses:u": 0.8860416666666666
+  },
+  "gen_close_finally": {
+   "instructions:u": 3949.3100283333333,
+   "branches:u": 736.6518616666667,
+   "branch-misses:u": 0.002916666666666667
+  },
+  "frame_return_drop": {
+   "instructions:u": 1111.0357283333333,
+   "branches:u": 185.01076,
+   "branch-misses:u": 0.0033383333333333333
+  },
+  "frame_return_fback": {
+   "instructions:u": 1382.98033,
+   "branches:u": 235.98800833333334,
+   "branch-misses:u": 0.008988333333333333
+  },
+  "gen_finish_next": {
+   "instructions:u": 1729.03601,
+   "branches:u": 273.00944,
+   "branch-misses:u": 0.0025183333333333334
+  },
+  "gen_finish_close": {
+   "instructions:u": 3961.0866416666668,
+   "branches:u": 736.026445,
+   "branch-misses:u": 0.003841666666666667
+  },
+  "gen_finish_next_frame_held": {
+   "instructions:u": 2504.819196666667,
+   "branches:u": 407.38163333333335,
+   "branch-misses:u": 0.0014433333333333334
+  },
+  "gen_finish_close_frame_held": {
+   "instructions:u": 4338.991376666667,
+   "branches:u": 801.9879716666667,
+   "branch-misses:u": 0.005356666666666667
+  },
+  "gen_finish_next_frame_released": {
+   "instructions:u": 2413.0435766666665,
+   "branches:u": 394.009565,
+   "branch-misses:u": 0.00211
+  }
+ }
+}

@@ -1,0 +1,129 @@
+diff --git a/Include/internal/pycore_genobject.h b/Include/internal/pycore_genobject.h
+index 6de917de544..39809560d71 100644
+--- a/Include/internal/pycore_genobject.h
++++ b/Include/internal/pycore_genobject.h
+@@ -12,6 +12,35 @@ extern "C" {
+ #include "pycore_interpframe_structs.h" // _PyGenObject
+ 
+ #include <stddef.h>               // offsetof()
++#include "pycore_tstate.h"        // _PyThreadStateImpl
++#include "pycore_interpframe.h"   // _PyFrame_GetCode()
++#include "pycore_pyatomic_ft_wrappers.h"
++#include "opcode_ids.h"           // RESUME_CHECK
++
++/* A suspended generator whose next instructions are RESUME_CHECK and
++   POP_TOP discards the value it is resumed with. When RESUME_CHECK would
++   pass, both instructions can be skipped and the value need not be
++   pushed. Returns the instruction to resume at, or NULL. */
++static inline Py_ALWAYS_INLINE _Py_CODEUNIT *
++_PyGen_SkipDiscardedResume(PyThreadState *tstate, _PyInterpreterFrame *frame)
++{
++    _Py_CODEUNIT *ip = frame->instr_ptr;
++    if (ip[0].op.code != RESUME_CHECK || ip[2].op.code != POP_TOP) {
++        return NULL;
++    }
++    uintptr_t eval_breaker = _Py_atomic_load_uintptr_relaxed(&tstate->eval_breaker);
++    uintptr_t version = FT_ATOMIC_LOAD_UINTPTR_ACQUIRE(
++        _PyFrame_GetCode(frame)->_co_instrumentation_version);
++    if (eval_breaker != version) {
++        return NULL;
++    }
++#ifdef Py_GIL_DISABLED
++    if (frame->tlbc_index != ((_PyThreadStateImpl *)tstate)->tlbc_index) {
++        return NULL;
++    }
++#endif
++    return ip + 3;
++}
+ 
+ 
+ static inline
+diff --git a/Objects/genobject.c b/Objects/genobject.c
+index 82a1bb1ff42..844bc756293 100644
+--- a/Objects/genobject.c
++++ b/Objects/genobject.c
+@@ -268,7 +268,16 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
+ 
+     /* Push arg onto the frame's value stack */
+     PyObject *arg_obj = arg ? arg : Py_None;
+-    _PyFrame_StackPush(frame, PyStackRef_FromPyObjectNew(arg_obj));
++    _Py_CODEUNIT *skip = NULL;
++    if (arg_obj == Py_None) {
++        skip = _PyGen_SkipDiscardedResume(tstate, frame);
++    }
++    if (skip != NULL) {
++        frame->instr_ptr = skip;
++    }
++    else {
++        _PyFrame_StackPush(frame, PyStackRef_FromPyObjectNew(arg_obj));
++    }
+ 
+     _PyErr_StackItem *prev_exc_info = tstate->exc_info;
+     gen->gi_exc_state.previous_item = prev_exc_info;
+diff --git a/Python/bytecodes.c b/Python/bytecodes.c
+index c6f1f61f3e0..4d617ce76de 100644
+--- a/Python/bytecodes.c
++++ b/Python/bytecodes.c
+@@ -1687,7 +1687,16 @@ dummy_func(
+             {
+                 PyGenObject *gen = (PyGenObject *)receiver_o;
+                 _PyInterpreterFrame *gen_frame = &gen->gi_iframe;
+-                _PyFrame_StackPush(gen_frame, PyStackRef_MakeHeapSafe(v));
++                _Py_CODEUNIT *skip = NULL;
++                if (PyStackRef_IsNone(v)) {
++                    skip = _PyGen_SkipDiscardedResume(tstate, gen_frame);
++                }
++                if (skip != NULL) {
++                    gen_frame->instr_ptr = skip;
++                }
++                else {
++                    _PyFrame_StackPush(gen_frame, PyStackRef_MakeHeapSafe(v));
++                }
+                 DEAD(v);
+                 SYNC_SP();
+                 gen->gi_exc_state.previous_item = tstate->exc_info;
+@@ -1732,7 +1741,16 @@ dummy_func(
+             EXIT_IF(!gen_try_set_executing((PyGenObject *)gen));
+             STAT_INC(SEND, hit);
+             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
+-            _PyFrame_StackPush(pushed_frame, PyStackRef_MakeHeapSafe(v));
++            _Py_CODEUNIT *skip = NULL;
++            if (PyStackRef_IsNone(v)) {
++                skip = _PyGen_SkipDiscardedResume(tstate, pushed_frame);
++            }
++            if (skip != NULL) {
++                pushed_frame->instr_ptr = skip;
++            }
++            else {
++                _PyFrame_StackPush(pushed_frame, PyStackRef_MakeHeapSafe(v));
++            }
+             DEAD(v);
+             gen->gi_exc_state.previous_item = tstate->exc_info;
+             tstate->exc_info = &gen->gi_exc_state;
+@@ -4081,7 +4099,13 @@ dummy_func(
+             EXIT_IF(!gen_try_set_executing((PyGenObject *)gen));
+             STAT_INC(FOR_ITER, hit);
+             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
+-            _PyFrame_StackPush(pushed_frame, PyStackRef_None);
++            _Py_CODEUNIT *skip = _PyGen_SkipDiscardedResume(tstate, pushed_frame);
++            if (skip != NULL) {
++                pushed_frame->instr_ptr = skip;
++            }
++            else {
++                _PyFrame_StackPush(pushed_frame, PyStackRef_None);
++            }
+             gen->gi_exc_state.previous_item = tstate->exc_info;
+             tstate->exc_info = &gen->gi_exc_state;
+             pushed_frame->previous = frame;
+diff --git a/Tools/cases_generator/analyzer.py b/Tools/cases_generator/analyzer.py
+index c3e0b0dbff2..c9106ae104c 100644
+--- a/Tools/cases_generator/analyzer.py
++++ b/Tools/cases_generator/analyzer.py
+@@ -602,6 +602,7 @@ def has_error_without_pop(op: parser.CodeDef) -> bool:
+     "_PyFrame_StackAssertInvalid",
+     "_PyFunction_SetVersion",
+     "_PyGen_GetGeneratorFromFrame",
++    "_PyGen_SkipDiscardedResume",
+     "gen_try_set_executing",
+     "_PyInterpreterState_GET",
+     "_PyList_AppendTakeRef",

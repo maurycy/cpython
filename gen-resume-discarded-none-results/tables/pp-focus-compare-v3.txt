@@ -1,0 +1,37 @@
+Benchmarks with tag 'asyncio':
+==============================
+
++-----------------+---------------+----------------------+
+| Benchmark       | pp-focus-base | pp-focus-v3          |
++=================+===============+======================+
+| async_tree_none | 173 ms        | 177 ms: 1.02x slower |
++-----------------+---------------+----------------------+
+| async_tree_io   | 437 ms        | 442 ms: 1.01x slower |
++-----------------+---------------+----------------------+
+| asyncio_tcp     | 192 ms        | 190 ms: 1.01x faster |
++-----------------+---------------+----------------------+
+| Geometric mean  | (ref)         | 1.00x slower         |
++-----------------+---------------+----------------------+
+
+Benchmark hidden because not significant (3): async_generators, async_tree_cpu_io_mixed, coroutines
+
+All benchmarks:
+===============
+
++-----------------+---------------+-----------------------+
+| Benchmark       | pp-focus-base | pp-focus-v3           |
++=================+===============+=======================+
+| async_tree_none | 173 ms        | 177 ms: 1.02x slower  |
++-----------------+---------------+-----------------------+
+| async_tree_io   | 437 ms        | 442 ms: 1.01x slower  |
++-----------------+---------------+-----------------------+
+| asyncio_tcp     | 192 ms        | 190 ms: 1.01x faster  |
++-----------------+---------------+-----------------------+
+| generators      | 16.6 ms       | 15.4 ms: 1.08x faster |
++-----------------+---------------+-----------------------+
+| nqueens         | 41.8 ms       | 41.3 ms: 1.01x faster |
++-----------------+---------------+-----------------------+
+| Geometric mean  | (ref)         | 1.01x faster          |
++-----------------+---------------+-----------------------+
+
+Benchmark hidden because not significant (4): async_generators, async_tree_cpu_io_mixed, comprehensions, coroutines
