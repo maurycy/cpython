@@ -337,7 +337,7 @@ gen_send_ex2(PyGenObject *gen, PyObject *arg, PyObject **presult, int exc)
 
 // Set the generator 'gen' to the executing state and send 'arg' into it.
 // See gen_send_ex2() for details.
-static PySendResult
+static inline Py_ALWAYS_INLINE PySendResult
 gen_send_ex(PyGenObject *gen, PyObject *arg, PyObject **presult)
 {
     *presult = NULL;
