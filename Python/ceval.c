@@ -1206,7 +1206,13 @@ dtrace_function_return(_PyInterpreterFrame *frame)
  * find the interpreter loop. With the tail-calling interpreter it is small
  * enough to be inlined into its callers, e.g. by Clang with PGO.
  */
-Py_NO_INLINE PyObject* _Py_HOT_FUNCTION DONT_SLP_VECTORIZE
+#if defined(__GNUC__) && !defined(__clang__) && defined(__x86_64__) && defined(__linux__)
+#  define _Py_EVAL_ALIGN __attribute__((aligned(64), patchable_function_entry(16, 16)))
+#else
+#  define _Py_EVAL_ALIGN
+#endif
+
+_Py_EVAL_ALIGN Py_NO_INLINE PyObject* _Py_HOT_FUNCTION DONT_SLP_VECTORIZE
 _PyEval_EvalFrameDefault(PyThreadState *tstate, _PyInterpreterFrame *frame, int throwflag)
 {
     _Py_EnsureTstateNotNULL(tstate);
