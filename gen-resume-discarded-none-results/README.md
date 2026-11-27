@@ -39,3 +39,7 @@ Setup: AMD EPYC 4484PX (Zen 4), Ubuntu 24.04.5, gcc 13.3.0, perf 6.8.12, `./conf
 python -m pyperf compare_to json/pp-full-base.json json/pp-full-v3.json --table
 python -m pyperf compare_to json/micro3-base.json json/micro3-v3.json --table
 ```
+
+## Second run
+
+`run2/` holds a later run for the `gen-resume-guards` branch on a fresh machine, with three builds per side and a forced alignment of the interpreter loop. See `run2/README.md`.
