@@ -8977,7 +8977,16 @@
             }
             STAT_INC(SEND, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
-            _PyFrame_StackPush(pushed_frame, PyStackRef_MakeHeapSafe(v));
+            _Py_CODEUNIT *skip = NULL;
+            if (PyStackRef_IsNone(v)) {
+                skip = _PyGen_SkipDiscardedResume(tstate, pushed_frame);
+            }
+            if (skip != NULL) {
+                pushed_frame->instr_ptr = skip;
+            }
+            else {
+                _PyFrame_StackPush(pushed_frame, PyStackRef_MakeHeapSafe(v));
+            }
             gen->gi_exc_state.previous_item = tstate->exc_info;
             tstate->exc_info = &gen->gi_exc_state;
             assert( 2u + oparg <= UINT16_MAX);
@@ -16188,81 +16197,6 @@
             break;
         }
 
-        case _FOR_ITER_GEN_FRAME_r03: {
-            CHECK_CURRENT_CACHED_VALUES(0);
-            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
-            _PyStackRef iter;
-            _PyStackRef gen_frame;
-            oparg = CURRENT_OPARG();
-            iter = stack_pointer[-2];
-            PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(iter);
-            if (Py_TYPE(gen) != &PyGen_Type) {
-                UOP_STAT_INC(uopcode, miss);
-                SET_CURRENT_CACHED_VALUES(0);
-                JUMP_TO_JUMP_TARGET();
-            }
-            if (!gen_try_set_executing((PyGenObject *)gen)) {
-                UOP_STAT_INC(uopcode, miss);
-                SET_CURRENT_CACHED_VALUES(0);
-                JUMP_TO_JUMP_TARGET();
-            }
-            STAT_INC(FOR_ITER, hit);
-            _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
-            _PyFrame_StackPush(pushed_frame, PyStackRef_None);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
-            pushed_frame->previous = frame;
-            frame->return_offset = (uint16_t)( 2u + oparg);
-            gen_frame = PyStackRef_Wrap(pushed_frame);
-            _tos_cache2 = gen_frame;
-            _tos_cache1 = stack_pointer[-1];
-            _tos_cache0 = iter;
-            SET_CURRENT_CACHED_VALUES(3);
-            stack_pointer += -2;
-            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
-            break;
-        }
-
-        case _FOR_ITER_GEN_FRAME_r13: {
-            CHECK_CURRENT_CACHED_VALUES(1);
-            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
-            _PyStackRef iter;
-            _PyStackRef gen_frame;
-            _PyStackRef _stack_item_0 = _tos_cache0;
-            oparg = CURRENT_OPARG();
-            iter = stack_pointer[-1];
-            PyGenObject *gen = (PyGenObject *)PyStackRef_AsPyObjectBorrow(iter);
-            if (Py_TYPE(gen) != &PyGen_Type) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(1);
-                JUMP_TO_JUMP_TARGET();
-            }
-            if (!gen_try_set_executing((PyGenObject *)gen)) {
-                UOP_STAT_INC(uopcode, miss);
-                _tos_cache0 = _stack_item_0;
-                SET_CURRENT_CACHED_VALUES(1);
-                JUMP_TO_JUMP_TARGET();
-            }
-            STAT_INC(FOR_ITER, hit);
-            _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
-            _PyFrame_StackPush(pushed_frame, PyStackRef_None);
-            gen->gi_exc_state.previous_item = tstate->exc_info;
-            tstate->exc_info = &gen->gi_exc_state;
-            pushed_frame->previous = frame;
-            frame->return_offset = (uint16_t)( 2u + oparg);
-            gen_frame = PyStackRef_Wrap(pushed_frame);
-            _tos_cache2 = gen_frame;
-            _tos_cache1 = _stack_item_0;
-            _tos_cache0 = iter;
-            SET_CURRENT_CACHED_VALUES(3);
-            stack_pointer += -1;
-            ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
-            ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
-            break;
-        }
-
         case _FOR_ITER_GEN_FRAME_r23: {
             CHECK_CURRENT_CACHED_VALUES(2);
             ASSERT_WITHIN_STACK_BOUNDS_IGNORING_CACHE(__FILE__, __LINE__);
@@ -16289,7 +16223,13 @@
             }
             STAT_INC(FOR_ITER, hit);
             _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
-            _PyFrame_StackPush(pushed_frame, PyStackRef_None);
+            _Py_CODEUNIT *skip = _PyGen_SkipDiscardedResume(tstate, pushed_frame);
+            if (skip != NULL) {
+                pushed_frame->instr_ptr = skip;
+            }
+            else {
+                _PyFrame_StackPush(pushed_frame, PyStackRef_None);
+            }
             gen->gi_exc_state.previous_item = tstate->exc_info;
             tstate->exc_info = &gen->gi_exc_state;
             pushed_frame->previous = frame;

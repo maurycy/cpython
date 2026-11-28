@@ -6430,7 +6430,13 @@
                 }
                 STAT_INC(FOR_ITER, hit);
                 _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
-                _PyFrame_StackPush(pushed_frame, PyStackRef_None);
+                _Py_CODEUNIT *skip = _PyGen_SkipDiscardedResume(tstate, pushed_frame);
+                if (skip != NULL) {
+                    pushed_frame->instr_ptr = skip;
+                }
+                else {
+                    _PyFrame_StackPush(pushed_frame, PyStackRef_None);
+                }
                 gen->gi_exc_state.previous_item = tstate->exc_info;
                 tstate->exc_info = &gen->gi_exc_state;
                 pushed_frame->previous = frame;
@@ -11574,7 +11580,16 @@
                 {
                     PyGenObject *gen = (PyGenObject *)receiver_o;
                     _PyInterpreterFrame *gen_frame = &gen->gi_iframe;
-                    _PyFrame_StackPush(gen_frame, PyStackRef_MakeHeapSafe(v));
+                    _Py_CODEUNIT *skip = NULL;
+                    if (PyStackRef_IsNone(v)) {
+                        skip = _PyGen_SkipDiscardedResume(tstate, gen_frame);
+                    }
+                    if (skip != NULL) {
+                        gen_frame->instr_ptr = skip;
+                    }
+                    else {
+                        _PyFrame_StackPush(gen_frame, PyStackRef_MakeHeapSafe(v));
+                    }
                     stack_pointer += -1;
                     ASSERT_WITHIN_STACK_BOUNDS(__FILE__, __LINE__);
                     gen->gi_exc_state.previous_item = tstate->exc_info;
@@ -11732,7 +11747,16 @@
                 }
                 STAT_INC(SEND, hit);
                 _PyInterpreterFrame *pushed_frame = &gen->gi_iframe;
-                _PyFrame_StackPush(pushed_frame, PyStackRef_MakeHeapSafe(v));
+                _Py_CODEUNIT *skip = NULL;
+                if (PyStackRef_IsNone(v)) {
+                    skip = _PyGen_SkipDiscardedResume(tstate, pushed_frame);
+                }
+                if (skip != NULL) {
+                    pushed_frame->instr_ptr = skip;
+                }
+                else {
+                    _PyFrame_StackPush(pushed_frame, PyStackRef_MakeHeapSafe(v));
+                }
                 gen->gi_exc_state.previous_item = tstate->exc_info;
                 tstate->exc_info = &gen->gi_exc_state;
                 assert( 2u + oparg <= UINT16_MAX);
